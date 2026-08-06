@@ -11,10 +11,15 @@ general audio captioning/QA in one model.
   `MOSS-Audio-8B-Thinking`) and downloads it from Hugging Face on first use to
   `ComfyUI/models/moss-audio/<model-name>`. Outputs a `BOO_MOSS_AUDIO_MODEL`.
 - **BOO MOSS-Audio Generate** — takes a `BOO_MOSS_AUDIO_MODEL`, a native
-  ComfyUI `AUDIO` input, and a text prompt (e.g. "Transcribe any speech
-  verbatim, then describe the music and mood."), and returns the model's text
-  response as a `STRING`. Thinking-variant `<think>...</think>` reasoning
-  blocks are stripped by default (`strip_thinking`).
+  ComfyUI `AUDIO` input, and a text prompt, and returns the model's text
+  response as a `STRING`. The default prompt asks for explicitly labeled
+  `LYRICS:`/`STYLE:` sections — plain requests like "transcribe the lyrics,
+  then describe the mood" reliably get the model to transcribe the lyrics but
+  drop the mood/style description entirely once it runs out of words to
+  transcribe; forcing two required, labeled sections fixes that (verified
+  empirically across both greedy and sampled decoding). Thinking-variant
+  `<think>...</think>` reasoning blocks are stripped by default
+  (`strip_thinking`).
 
 Wire `BOO MOSS-Audio Generate`'s `STRING` output into any downstream
 prompt-enhancement node (e.g. [boo-textgen](https://github.com/rockerboo/boo-textgen))

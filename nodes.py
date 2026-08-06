@@ -168,7 +168,10 @@ class BooMossAudioGenerate(io.ComfyNode):
                 io.String.Input(
                     "prompt",
                     multiline=True,
-                    default="Transcribe any speech verbatim, then describe the music and mood.",
+                    default="""You are an audio analyst. Do BOTH of the following, in order, and do not skip either:
+1) LYRICS: Transcribe every sung or spoken word verbatim, in order. If there is no speech/singing, write "(none)".
+2) STYLE: Describe the musical style, genre, instrumentation, tempo, and overall mood.
+Always include both sections, labeled exactly "LYRICS:" and "STYLE:".""",
                 ),
                 io.Int.Input("max_new_tokens", default=1024, min=1, max=8192),
                 io.Float.Input("temperature", default=1.0, min=0.0, max=2.0, step=0.01),
