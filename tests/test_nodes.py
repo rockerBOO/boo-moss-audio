@@ -37,3 +37,55 @@ def test_think_block_regex_strips_reasoning_but_keeps_the_answer():
     raw = "<think>reasoning about the audio</think>The clip is upbeat pop music."
     stripped = _THINK_BLOCK_RE.sub("", raw).strip()
     assert stripped == "The clip is upbeat pop music."
+
+
+import comfy.model_management
+import comfy.model_patcher
+import torch
+
+MossAudioModel = nodes.MossAudioModel
+MossAudioProcessor = nodes.MossAudioProcessor
+
+
+class _FakeHFModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.linear = torch.nn.Linear(2, 2)
+
+
+def test_loader_wraps_model_in_model_patcher_with_pinned_dtype(monkeypatch, tmp_path):
+    monkeypatch.setattr(nodes, "_local_model_dir", lambda repo_id: str(tmp_path))
+
+    fake_model = _FakeHFModel()
+    captured = {}
+
+    def fake_model_from_pretrained(local_dir, dtype):
+        captured["local_dir"] = local_dir
+        captured["dtype"] = dtype
+        return fake_model
+
+    def fake_processor_from_pretrained(local_dir, enable_time_marker):
+        return object()
+
+    monkeypatch.setattr(
+        MossAudioModel, "from_pretrained", staticmethod(fake_model_from_pretrained)
+    )
+    monkeypatch.setattr(
+        MossAudioProcessor, "from_pretrained", staticmethod(fake_processor_from_pretrained)
+    )
+
+    output = BooMossAudioLoader.execute(model="MOSS-Audio-4B-Instruct", enable_time_marker=True)
+    result = output.args[0]
+
+    assert captured["local_dir"] == str(tmp_path)
+    expected_dtype = comfy.model_management.text_encoder_dtype(
+        comfy.model_management.get_torch_device()
+    )
+    assert captured["dtype"] == expected_dtype
+
+    assert set(result.keys()) == {"patcher", "processor", "model_id"}
+    patcher = result["patcher"]
+    assert isinstance(patcher, comfy.model_patcher.ModelPatcher)
+    assert patcher.model is fake_model
+    assert patcher.load_device == comfy.model_management.get_torch_device()
+    assert patcher.offload_device == comfy.model_management.unet_offload_device()

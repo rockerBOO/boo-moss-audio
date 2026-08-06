@@ -87,6 +87,7 @@ class BooMossAudioLoader(io.ComfyNode):
     @classmethod
     def execute(cls, model: str, enable_time_marker: bool) -> io.NodeOutput:
         import comfy.model_management as model_management
+        import comfy.model_patcher
         from huggingface_hub import snapshot_download
 
         repo_id = MOSS_AUDIO_REPOS[model]
@@ -95,19 +96,21 @@ class BooMossAudioLoader(io.ComfyNode):
             logging.info("BooMossAudioLoader: downloading %s to %s", repo_id, local_dir)
             snapshot_download(repo_id=repo_id, local_dir=local_dir)
 
-        device = model_management.get_torch_device()
-        hf_model = MossAudioModel.from_pretrained(
-            local_dir,
-            dtype="auto",
-            device_map=device,
-        )
+        load_device = model_management.get_torch_device()
+        offload_device = model_management.unet_offload_device()
+        dtype = model_management.text_encoder_dtype(load_device)
+
+        hf_model = MossAudioModel.from_pretrained(local_dir, dtype=dtype)
         hf_model.eval()
+        patcher = comfy.model_patcher.ModelPatcher(
+            hf_model, load_device=load_device, offload_device=offload_device
+        )
         processor = MossAudioProcessor.from_pretrained(
             local_dir,
             enable_time_marker=enable_time_marker,
         )
 
-        return io.NodeOutput({"model": hf_model, "processor": processor, "model_id": model})
+        return io.NodeOutput({"patcher": patcher, "processor": processor, "model_id": model})
 
 
 class BooMossAudioGenerate(io.ComfyNode):
