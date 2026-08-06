@@ -58,3 +58,16 @@ See `vendor/moss_audio/NOTICE` for provenance, source commit, license basis
 source /path/to/ComfyUI/.venv/bin/activate
 pytest
 ```
+
+### GPU integration tests
+
+`tests_gpu/` holds an opt-in suite that downloads a real checkpoint and
+exercises a full load → offload → reload → generate cycle against an actual
+CUDA GPU, verifying the model survives being moved between devices by
+ComfyUI's `ModelPatcher`. It's excluded from the default `pytest` run
+(not in `pyproject.toml`'s `testpaths`) since it needs a GPU, network
+access, and downloads a multi-gigabyte checkpoint. Run it explicitly:
+
+```bash
+pytest tests_gpu/
+```

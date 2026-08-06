@@ -21,3 +21,7 @@ extend-exclude = ["vendor"]
 # comfy.cli_args.args.cpu must be set before nodes.py (transitively) imports
 # comfy.model_management, so this import is intentionally not at the top.
 "tests/conftest.py" = ["E402"]
+# Same rationale as tests/conftest.py -- nodes.py must be loaded before
+# comfy.model_management is imported.
+"tests_gpu/conftest.py" = ["E402"]
+"tests_gpu/test_moss_audio_gpu_roundtrip.py" = ["E402"]

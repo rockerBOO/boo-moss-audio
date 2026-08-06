@@ -1,90 +1,61 @@
-# TODO: integrate MOSS-Audio with ComfyUI's model management
+# ComfyUI model-management integration — empirically blocked
 
-Not implemented yet. Written down for a future agent/session instead of
-being done inline, because it's a real but bounded change (medium-sized —
-roughly a day of careful implementation + testing), not a quick fix.
+Tasks 1-2 of the implementation plan (see
+`docs/superpowers/specs/2026-08-06-comfy-model-management-integration-design.md`)
+wrapped the loaded HF model in `comfy.model_patcher.ModelPatcher` and
+registered it with `load_models_gpu` before inference
+(`nodes.py`'s `BooMossAudioLoader`/`BooMossAudioGenerate`). Code review of
+that change passed, but step 7 below — the one thing code review alone
+can't confirm — was flagged as needing a real GPU load → offload → reload →
+generate cycle.
 
-## Current state (the problem)
+`tests_gpu/test_moss_audio_gpu_roundtrip.py` runs exactly that cycle
+against a real CUDA GPU and a real checkpoint. It fails, and the failure is
+a genuine incompatibility, not a test bug:
 
-`BooMossAudioLoader.execute` (`nodes.py`) loads the HF model with
-`device_map=model_management.get_torch_device()` and holds a plain reference
-to it for the node's lifetime. This model is completely invisible to
-ComfyUI's VRAM manager (`comfy.model_management`): once loaded, it
-permanently occupies VRAM and ComfyUI has no way to swap it out when a
-diffusion model or another CLIP needs the space, unlike every other
-model-holding node in ComfyUI (including this repo's sibling package,
-boo-textgen, whose MiniMax H3 / Qwen3-VL CLIP nodes *do* participate in
-VRAM-aware loading).
+```
+model_management.load_models_gpu([patcher])
+...
+comfy/model_patcher.py:1149: in unpatch_model
+    self.model.device = device_to
+AttributeError: property 'device' of 'MossAudioModel' object has no setter
+```
 
-## What Qwen3-VL / MiniMax H3 do differently (the precedent)
+`ModelPatcher` assumes `self.model` exposes a plain, settable `.device`
+attribute — true for ComfyUI's own model classes (e.g. `comfy/model_base.py`
+sets `self.device` as a normal instance attribute), and several places in
+`comfy/model_patcher.py` (`partially_load`/`unpatch_model`/`patch_model`,
+around lines 346-348, 1095, 1149, 1297, 1992) assign to it directly.
+`MossAudioModel`, like any `transformers.PreTrainedModel`, instead inherits
+`device` as a **read-only computed property** from
+`transformers.modeling_utils.ModuleUtilsMixin` (`get_parameter_device(self)`)
+— there is no setter, so the assignment raises `AttributeError` the first
+time `ModelPatcher` tries to move the model off the load device.
 
-ComfyUI's `comfy.model_patcher.ModelPatcher` (`comfy/model_patcher.py:340`)
-wraps *any* `nn.Module` — it only needs `state_dict()`/`.to(device)` to
-exist, and stamps bookkeeping attributes onto the module rather than
-requiring a comfy-authored architecture. Size accounting comes from
-`comfy.model_management.module_size()` (`comfy/model_management.py:623`),
-which just sums `state_dict()` tensor `.nbytes` — architecture-agnostic.
-Passing a `ModelPatcher` to `comfy.model_management.load_models_gpu([...])`
-(`comfy/model_management.py:901`) registers it in the global
-`current_loaded_models` registry, making it visible for eviction/reload
-alongside every other loaded model.
+This means wrapping a raw HF `PreTrainedModel` in `ModelPatcher` as
+implemented by Tasks 1-2 does not actually work end-to-end: the model loads
+fine the first time (construction-time `device_map=...`/`.to()` calls don't
+go through this path), but any subsequent offload/reload — the exact thing
+`ModelPatcher` exists to do — crashes on the `device` property.
 
-`boo-textgen/minimax_h3_tail.py`'s `_build_tail()` (around line 265-298) is
-the concrete template for this in our own codebase: it builds a plain
-`nn.Module`, wraps it in `ModelPatcher(tail, load_device=..., offload_device=...)`,
-registers it with `load_models_gpu([clip.patcher, tail_patcher], memory_required=...)`
-right before generation, and explicitly unloads it afterward in a
-`try/finally` via `comfy.model_management.unload_model_and_clones(tail_patcher, ..., all_devices=True)`
-plus `gc.collect()` + `soft_empty_cache(force=True)`. That module is
-comfy-authored (uses `comfy.ops`), though — it doesn't prove a HF
-`PreTrainedModel` specifically behaves correctly under this treatment, which
-is the real open question below.
+## Status
 
-## What would actually need to change
+**Not resolved.** The GPU integration test
+(`tests_gpu/test_moss_audio_gpu_roundtrip.py`) exists and correctly detects
+this; do not weaken or delete its assertions to make it pass. Fixing this
+needs a follow-up change beyond the scope of the current plan, e.g. one of:
 
-1. **Drop `device_map=...`** from `MossAudioModel.from_pretrained` — load on
-   CPU so ComfyUI's `ModelPatcher.to(device)` calls own placement instead of
-   fighting HF's own `accelerate` device-map dispatch (mixing the two is a
-   real hazard, not just a style preference).
-2. **Wrap the loaded model**: `ModelPatcher(hf_model, load_device=model_management.get_torch_device(), offload_device=model_management.unet_offload_device())`.
-3. **Move the actual `load_models_gpu([patcher], ...)` call into
-   `BooMossAudioGenerate.execute`**, not the loader — mirrors
-   `generate_with_tail`'s pattern of loading right before use so unrelated
-   VRAM pressure can evict a MOSS-Audio model sitting idle between runs.
-   `BooMossAudioLoader` should return the (CPU-resident, unregistered)
-   patcher; `BooMossAudioGenerate` registers it for the duration of the call.
-4. **Run inference against `patcher.model`**, not the original `hf_model`
-   reference — after `ModelPatcher` construction, `patcher.model` is the
-   instance ComfyUI's offload machinery actually moves between devices.
-5. **Pin a concrete dtype** instead of `dtype="auto"` — should follow the
-   same pattern as `comfy.model_management.text_encoder_dtype`/`unet_dtype`
-   so the chosen dtype is consistent with what `load_device` can actually
-   run and with what ComfyUI expects when it moves the model.
-6. **No sub-layer lowvram streaming will be available** — MOSS-Audio's
-   modules aren't wrapped in `comfy.ops`-casting classes, so `ModelPatcher`
-   can only do whole-model load/offload for it, not the partial per-layer
-   eviction some comfy-native models get under tight VRAM. That's an
-   accepted limitation, not a blocker.
-7. **Verify empirically** that MOSS-Audio's HF modules tolerate being moved
-   between devices post-construction by `ModelPatcher` — some HF models
-   cache device-dependent buffers (rotary embedding caches, KV-cache dtype)
-   at construction or first-forward time that can go stale across an
-   offload/reload cycle. This needs a real load → offload → reload →
-   generate test, not just code review.
-8. **Follow the defensive cleanup pattern** `generate_with_tail` uses:
-   `try/finally` around the generate call, catching `BaseException` (so
-   `KeyboardInterrupt`/ComfyUI's own interrupt exception still triggers
-   cleanup), even though — unlike the tail — a steady-state MOSS-Audio load
-   doesn't need to *unload* after every call. `load_models_gpu` is
-   idempotent/registry-aware, so calling it every `BooMossAudioGenerate.execute`
-   is fine and is how ComfyUI naturally keeps a model loaded across runs
-   while still allowing eviction under pressure elsewhere.
+- Subclass/monkeypatch `MossAudioModel` to add a settable `device` attribute
+  (e.g. override the property, or set `type(model).device` to a plain
+  attribute-backed property) before wrapping it in `ModelPatcher`.
+- Give `ModelPatcher` a model wrapper (comfy-native `nn.Module`) that holds
+  the HF model as a submodule and owns its own settable `device`, mirroring
+  `boo-textgen/minimax_h3_tail.py`'s `_build_tail()` pattern more closely
+  instead of wrapping the raw `PreTrainedModel` directly.
+- Confirm whether newer/older `transformers` versions differ here (this was
+  observed against `transformers==4.57.3`) before committing to a fix.
 
-## Why this wasn't just done inline
-
-The change touches the load/generate split (state currently returned by the
-loader would need to become a patcher instead of a live model+processor
-dict), requires dtype decisions that need testing against actual VRAM
-behavior, and step 7 specifically can't be verified by code reading alone —
-it needs a real GPU session with an actual offload/reload cycle exercised
-before generating, which wasn't done as part of this write-up.
+Re-run `pytest tests_gpu/ -v` after any such fix; it should go from
+`AttributeError` to a clean pass (`load_models_gpu` succeeds, offload drops
+the model back to the offload device, and a real `generate()` call returns
+non-empty text) before this doc is marked resolved.
