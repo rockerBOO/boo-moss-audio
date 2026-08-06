@@ -49,6 +49,8 @@ def test_moss_audio_survives_load_offload_reload_generate_cycle():
         temperature=1.0,
         top_p=1.0,
         top_k=50,
+        repetition_penalty=1.0,
+        seed=0,
         strip_thinking=True,
     )
 

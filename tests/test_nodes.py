@@ -128,6 +128,8 @@ def _generate_kwargs(**overrides):
         temperature=1.0,
         top_p=1.0,
         top_k=50,
+        repetition_penalty=1.0,
+        seed=0,
         strip_thinking=True,
     )
     kwargs.update(overrides)

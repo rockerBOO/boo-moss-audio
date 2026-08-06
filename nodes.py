@@ -169,14 +169,34 @@ class BooMossAudioGenerate(io.ComfyNode):
                     "prompt",
                     multiline=True,
                     default="""You are an audio analyst. Do BOTH of the following, in order, and do not skip either:
-1) LYRICS: Transcribe every sung or spoken word verbatim, in order. If there is no speech/singing, write "(none)".
-2) STYLE: Describe the musical style, genre, instrumentation, tempo, and overall mood.
-Always include both sections, labeled exactly "LYRICS:" and "STYLE:".""",
+1) SPEECH: Transcribe every spoken or sung word verbatim, in order. Start a new tagged block only when switching between spoken dialogue and sung lyrics, writing "[spoken]" or "[sung]" once at the start of that block, not before every line. Inside a sung block, put each lyric line on its own line (a literal line break between lines), the way song lyrics are normally printed; keep spoken dialogue in flowing prose. If there is no speech or singing at all, write "(none)".
+2) STYLE: Describe the musical/ambient style, genre, instrumentation, tempo, and overall mood.
+Always include both sections, labeled exactly "SPEECH:" and "STYLE:". Never repeat the same word, phrase, or sound more than twice in a row.
+
+Example output:
+SPEECH: [spoken] Hey, are you seeing this?
+[sung]
+Lights are low,
+we're moving slow,
+dancing where the shadows grow,
+holding on to what we know.
+STYLE: A mellow synth-pop track with a laid-back tempo, warm analog pads, and a soft four-on-the-floor beat. The mood is intimate and dreamy.
+
+Now analyze the given audio in the same format.""",
                 ),
                 io.Int.Input("max_new_tokens", default=1024, min=1, max=8192),
                 io.Float.Input("temperature", default=1.0, min=0.0, max=2.0, step=0.01),
                 io.Float.Input("top_p", default=1.0, min=0.0, max=1.0, step=0.01),
                 io.Int.Input("top_k", default=50, min=0, max=500),
+                io.Float.Input("repetition_penalty", default=1.0, min=1.0, max=2.0, step=0.01),
+                io.Int.Input(
+                    "seed",
+                    default=0,
+                    min=0,
+                    max=0xFFFFFFFFFFFFFFFF,
+                    control_after_generate=True,
+                    tooltip="Seed for sampling (only affects output when temperature > 0).",
+                ),
                 io.Boolean.Input(
                     "strip_thinking",
                     default=True,
@@ -196,6 +216,8 @@ Always include both sections, labeled exactly "LYRICS:" and "STYLE:".""",
         temperature: float,
         top_p: float,
         top_k: int,
+        repetition_penalty: float,
+        seed: int,
         strip_thinking: bool,
     ) -> io.NodeOutput:
         import comfy.model_management as model_management
@@ -219,6 +241,11 @@ Always include both sections, labeled exactly "LYRICS:" and "STYLE:".""",
             inputs["audio_data"] = inputs["audio_data"].to(hf_model.dtype)
         inputs["audio_input_mask"] = inputs["input_ids"] == processor.audio_token_id
 
+        # transformers' GenerationMixin.generate() has no `generator` kwarg --
+        # sampling draws from torch's global RNG, so seeding it here is the
+        # only way to make do_sample=True runs reproducible.
+        torch.manual_seed(seed)
+
         try:
             with torch.no_grad():
                 generated_ids = hf_model.generate(
@@ -229,6 +256,7 @@ Always include both sections, labeled exactly "LYRICS:" and "STYLE:".""",
                     temperature=max(temperature, 1e-5),
                     top_p=top_p,
                     top_k=top_k,
+                    repetition_penalty=repetition_penalty,
                     use_cache=True,
                 )
         finally:

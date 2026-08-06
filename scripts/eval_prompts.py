@@ -45,22 +45,35 @@ def _load_audio(wav_path: str) -> dict:
     sr, data = wavfile.read(wav_path)
     if data.dtype == np.int16:
         data = data.astype(np.float32) / 32768.0
-    waveform = torch.from_numpy(data).float().unsqueeze(0).unsqueeze(0)  # [1, 1, samples]
+    if data.ndim == 1:
+        data = data[:, None]  # mono -> [samples, 1]
+    waveform = torch.from_numpy(data.T).float().unsqueeze(0)  # [1, channels, samples]
     return {"waveform": waveform, "sample_rate": sr}
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--audio", required=True, help="Path to a mono/stereo .wav file")
-    parser.add_argument("--model", default="MOSS-Audio-4B-Instruct", choices=[
-        "MOSS-Audio-4B-Instruct", "MOSS-Audio-4B-Thinking",
-        "MOSS-Audio-8B-Instruct", "MOSS-Audio-8B-Thinking",
-    ])
+    parser.add_argument(
+        "--model",
+        default="MOSS-Audio-4B-Instruct",
+        choices=[
+            "MOSS-Audio-4B-Instruct",
+            "MOSS-Audio-4B-Thinking",
+            "MOSS-Audio-8B-Instruct",
+            "MOSS-Audio-8B-Thinking",
+        ],
+    )
     parser.add_argument("--prompts-file", help="JSON object of {name: prompt_text}")
-    parser.add_argument("--repeats", type=int, default=1, help="Trials per prompt, each with a different seed")
+    parser.add_argument(
+        "--repeats", type=int, default=1, help="Trials per prompt, each with a different seed"
+    )
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top-p", type=float, default=0.9)
     parser.add_argument("--top-k", type=int, default=50)
+    parser.add_argument("--repetition-penalty", type=float, default=1.0)
     parser.add_argument("--max-new-tokens", type=int, default=1024)
     args = parser.parse_args()
 
@@ -86,7 +99,6 @@ def main():
     for name, prompt in prompts.items():
         for trial in range(args.repeats):
             seed = 42 + trial
-            torch.manual_seed(seed)
             print(f"\n===== {name} (trial {trial}, seed={seed}) =====")
             print(f"PROMPT: {prompt}")
             output = nodes.BooMossAudioGenerate.execute(
@@ -97,6 +109,8 @@ def main():
                 temperature=args.temperature,
                 top_p=args.top_p,
                 top_k=args.top_k,
+                repetition_penalty=args.repetition_penalty,
+                seed=seed,
                 strip_thinking=True,
             )
             print(f"OUTPUT:\n{output.args[0]}")
