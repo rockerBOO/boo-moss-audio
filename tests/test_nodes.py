@@ -1,4 +1,9 @@
 import sys
+from types import SimpleNamespace
+
+import comfy.model_management
+import comfy.model_patcher
+import torch
 
 nodes = sys.modules["boo_moss_audio_nodes"]
 BooMossAudioLoader = nodes.BooMossAudioLoader
@@ -39,10 +44,6 @@ def test_think_block_regex_strips_reasoning_but_keeps_the_answer():
     assert stripped == "The clip is upbeat pop music."
 
 
-import comfy.model_management
-import comfy.model_patcher
-import torch
-
 MossAudioModel = nodes.MossAudioModel
 MossAudioProcessor = nodes.MossAudioProcessor
 
@@ -68,9 +69,7 @@ def test_loader_wraps_model_in_model_patcher_with_pinned_dtype(monkeypatch, tmp_
     def fake_processor_from_pretrained(local_dir, enable_time_marker):
         return object()
 
-    monkeypatch.setattr(
-        MossAudioModel, "from_pretrained", staticmethod(fake_model_from_pretrained)
-    )
+    monkeypatch.setattr(MossAudioModel, "from_pretrained", staticmethod(fake_model_from_pretrained))
     monkeypatch.setattr(
         MossAudioProcessor, "from_pretrained", staticmethod(fake_processor_from_pretrained)
     )
@@ -79,9 +78,12 @@ def test_loader_wraps_model_in_model_patcher_with_pinned_dtype(monkeypatch, tmp_
     result = output.args[0]
 
     assert captured["local_dir"] == str(tmp_path)
-    expected_dtype = comfy.model_management.text_encoder_dtype(
-        comfy.model_management.get_torch_device()
-    )
+    load_device = comfy.model_management.get_torch_device()
+    expected_dtype = comfy.model_management.text_encoder_dtype(load_device)
+    if expected_dtype not in (torch.float16, torch.bfloat16, torch.float32):
+        expected_dtype = torch.float16
+    if expected_dtype == torch.float16 and comfy.model_management.should_use_bf16(load_device):
+        expected_dtype = torch.bfloat16
     assert captured["dtype"] == expected_dtype
 
     assert set(result.keys()) == {"patcher", "processor", "model_id"}
@@ -90,9 +92,6 @@ def test_loader_wraps_model_in_model_patcher_with_pinned_dtype(monkeypatch, tmp_
     assert patcher.model is fake_model
     assert patcher.load_device == comfy.model_management.get_torch_device()
     assert patcher.offload_device == comfy.model_management.unet_offload_device()
-
-
-from types import SimpleNamespace
 
 
 class _FakePatcher:

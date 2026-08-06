@@ -9,9 +9,7 @@ BooMossAudioGenerate = nodes.BooMossAudioGenerate
 
 import comfy.model_management as model_management
 
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="requires a CUDA GPU"
-)
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA GPU")
 
 
 def test_moss_audio_survives_load_offload_reload_generate_cycle():
@@ -30,11 +28,13 @@ def test_moss_audio_survives_load_offload_reload_generate_cycle():
 
     # 1. Load onto the GPU and confirm residency.
     model_management.load_models_gpu([patcher])
-    assert patcher.model.device.type == load_device.type
+    assert next(patcher.model.parameters()).device.type == load_device.type
+    assert all(p.device.type == load_device.type for p in patcher.model.parameters())
 
     # 2. Force eviction back to the offload device.
     model_management.unload_model_and_clones(patcher, all_devices=True)
-    assert patcher.model.device.type == patcher.offload_device.type
+    assert next(patcher.model.parameters()).device.type == patcher.offload_device.type
+    assert all(p.device.type == patcher.offload_device.type for p in patcher.model.parameters())
 
     # 3. Reload and run a real end-to-end generate() call.
     sample_rate = 16000

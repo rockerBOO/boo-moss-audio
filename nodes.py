@@ -125,6 +125,16 @@ class BooMossAudioLoader(io.ComfyNode):
         load_device = model_management.get_torch_device()
         offload_device = model_management.unet_offload_device()
         dtype = model_management.text_encoder_dtype(load_device)
+        if dtype not in (torch.float16, torch.bfloat16, torch.float32):
+            # MOSS-Audio has no comfy.ops casting layers, so fp8 (from
+            # --fp8-e4m3fn-text-enc/--fp8-e5m2-text-enc) would crash on the first
+            # F.conv2d/F.linear call. Fall back to a dtype it can actually run.
+            dtype = torch.float16
+        if dtype == torch.float16 and model_management.should_use_bf16(load_device):
+            # Every MOSS-Audio checkpoint's config.json declares bfloat16; prefer it
+            # over the text_encoder_dtype() default of float16 when the device
+            # supports it.
+            dtype = torch.bfloat16
 
         hf_model = MossAudioModel.from_pretrained(local_dir, dtype=dtype)
         hf_model.eval()
