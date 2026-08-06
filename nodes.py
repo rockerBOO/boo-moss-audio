@@ -50,6 +50,31 @@ def _local_model_dir(repo_id: str) -> str:
     return os.path.join(folder, repo_id.split("/", 1)[1])
 
 
+def _make_device_settable(model):
+    """comfy.model_patcher.ModelPatcher assigns directly to `model.device`
+    during offload/reload (comfy/model_patcher.py:346,348,1095,1149,1992),
+    but HF's PreTrainedModel.device (inherited via ModuleUtilsMixin) is a
+    read-only computed property with no setter -- confirmed via AttributeError
+    on the first real load_models_gpu() offload. Overriding `device` as a
+    plain settable property on a dynamic per-instance subclass lets
+    ModelPatcher track device state the same way it does for comfy-native
+    models, which set `self.device` as an ordinary attribute.
+    """
+    patched_cls = type(
+        f"{type(model).__name__}ComfyPatchable",
+        (type(model),),
+        {
+            "device": property(
+                lambda self: self.__dict__["_comfy_device"],
+                lambda self, value: self.__dict__.__setitem__("_comfy_device", value),
+            )
+        },
+    )
+    model.__class__ = patched_cls
+    model._comfy_device = next(model.parameters()).device
+    return model
+
+
 BooMossAudioModel = io.Custom("BOO_MOSS_AUDIO_MODEL")
 
 
@@ -103,6 +128,7 @@ class BooMossAudioLoader(io.ComfyNode):
 
         hf_model = MossAudioModel.from_pretrained(local_dir, dtype=dtype)
         hf_model.eval()
+        hf_model = _make_device_settable(hf_model)
         patcher = comfy.model_patcher.ModelPatcher(
             hf_model, load_device=load_device, offload_device=offload_device
         )

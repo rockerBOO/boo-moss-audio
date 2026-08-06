@@ -194,6 +194,29 @@ def test_generate_cleans_up_without_unloading_model_on_success(monkeypatch):
     assert unload_calls == []
 
 
+class _ReadOnlyDeviceModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.linear = torch.nn.Linear(2, 2)
+
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
+
+def test_make_device_settable_allows_assigning_device_after_patch():
+    model = _ReadOnlyDeviceModel()
+    original_device = model.device
+
+    patched = nodes._make_device_settable(model)
+
+    assert patched.device == original_device
+
+    new_device = torch.device("cpu")
+    patched.device = new_device
+    assert patched.device == new_device
+
+
 def test_generate_still_cleans_up_and_reraises_on_generate_failure(monkeypatch):
     class FailingHFModel:
         device = "cpu"
