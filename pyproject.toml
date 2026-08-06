@@ -1,0 +1,23 @@
+[project]
+name = "boo-moss-audio"
+version = "0.1.0"
+description = "ComfyUI custom nodes for OpenMOSS's MOSS-Audio audio-understanding models."
+readme = "README.md"
+license = "GPL-3.0-or-later"
+requires-python = ">=3.11"
+dependencies = ["huggingface_hub>=0.20.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--import-mode=importlib --confcutdir=tests -p no:torchtyping"
+
+[tool.ruff]
+line-length = 100
+# vendor/ is third-party code (see vendor/moss_audio/NOTICE) -- kept as close
+# to upstream as possible, not reformatted/relinted to this project's style.
+extend-exclude = ["vendor"]
+
+[tool.ruff.lint.per-file-ignores]
+# comfy.cli_args.args.cpu must be set before nodes.py (transitively) imports
+# comfy.model_management, so this import is intentionally not at the top.
+"tests/conftest.py" = ["E402"]

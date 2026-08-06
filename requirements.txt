@@ -1,0 +1,13 @@
+# ComfyUI Manager installs custom-node dependencies from this file, not
+# pyproject.toml, so it's kept in sync with the [project.dependencies] list
+# there.
+#
+# torch/torchaudio/transformers/numpy are deliberately NOT listed here --
+# they're already provided by ComfyUI's own environment, and repinning them
+# risks conflicting with ComfyUI's own version choices (this bit us once
+# already: installing MOSS-Audio's own upstream package pulled in an
+# incompatible huggingface_hub major version and broke ComfyUI's own model
+# loading -- see vendor/moss_audio/NOTICE). The four MOSS-Audio source files
+# this package actually runs (vendor/moss_audio/) were verified by a real
+# load+generate run to need nothing beyond torch/torchaudio/transformers/numpy.
+huggingface_hub>=0.20.0
