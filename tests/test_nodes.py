@@ -90,3 +90,135 @@ def test_loader_wraps_model_in_model_patcher_with_pinned_dtype(monkeypatch, tmp_
     assert patcher.model is fake_model
     assert patcher.load_device == comfy.model_management.get_torch_device()
     assert patcher.offload_device == comfy.model_management.unet_offload_device()
+
+
+from types import SimpleNamespace
+
+
+class _FakePatcher:
+    def __init__(self, model):
+        self.model = model
+
+
+class _FakeInputs(dict):
+    def to(self, device):
+        return self
+
+
+class _FakeProcessor:
+    def __init__(self):
+        self.audio_token_id = 999
+        self.config = SimpleNamespace(mel_sr=16000)
+
+    def __call__(self, text, audios, return_tensors):
+        return _FakeInputs(input_ids=torch.tensor([[1, 2, 3]]))
+
+    def decode(self, ids, skip_special_tokens=True):
+        return "generated text"
+
+
+def _fake_audio():
+    return {"waveform": torch.zeros(1, 1, 16000), "sample_rate": 16000}
+
+
+def _generate_kwargs(**overrides):
+    kwargs = dict(
+        audio=_fake_audio(),
+        prompt="describe this",
+        max_new_tokens=8,
+        temperature=1.0,
+        top_p=1.0,
+        top_k=50,
+        strip_thinking=True,
+    )
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_generate_registers_patcher_with_load_models_gpu_and_uses_patcher_model(monkeypatch):
+    class FakeHFModel:
+        device = "cpu"
+        dtype = torch.float32
+
+        def generate(self, **kwargs):
+            return torch.tensor([[1, 2, 3, 4, 5]])
+
+    fake_model = FakeHFModel()
+    patcher = _FakePatcher(fake_model)
+    recorded_calls = []
+    monkeypatch.setattr(
+        comfy.model_management, "load_models_gpu", lambda models: recorded_calls.append(models)
+    )
+    monkeypatch.setattr(comfy.model_management, "soft_empty_cache", lambda force=False: None)
+
+    output = BooMossAudioGenerate.execute(
+        moss_audio_model={"patcher": patcher, "processor": _FakeProcessor()},
+        **_generate_kwargs(),
+    )
+
+    assert recorded_calls == [[patcher]]
+    assert output.args[0] == "generated text"
+
+
+def test_generate_cleans_up_without_unloading_model_on_success(monkeypatch):
+    class FakeHFModel:
+        device = "cpu"
+        dtype = torch.float32
+
+        def generate(self, **kwargs):
+            return torch.tensor([[1, 2, 3, 4, 5]])
+
+    patcher = _FakePatcher(FakeHFModel())
+    monkeypatch.setattr(comfy.model_management, "load_models_gpu", lambda models: None)
+
+    gc_calls = []
+    cache_calls = []
+    unload_calls = []
+    monkeypatch.setattr(nodes.gc, "collect", lambda: gc_calls.append(True))
+    monkeypatch.setattr(
+        comfy.model_management, "soft_empty_cache", lambda force=False: cache_calls.append(force)
+    )
+    monkeypatch.setattr(
+        comfy.model_management,
+        "unload_model_and_clones",
+        lambda *a, **kw: unload_calls.append((a, kw)),
+    )
+
+    BooMossAudioGenerate.execute(
+        moss_audio_model={"patcher": patcher, "processor": _FakeProcessor()},
+        **_generate_kwargs(),
+    )
+
+    assert gc_calls == [True]
+    assert cache_calls == [True]
+    assert unload_calls == []
+
+
+def test_generate_still_cleans_up_and_reraises_on_generate_failure(monkeypatch):
+    class FailingHFModel:
+        device = "cpu"
+        dtype = torch.float32
+
+        def generate(self, **kwargs):
+            raise RuntimeError("boom")
+
+    patcher = _FakePatcher(FailingHFModel())
+    monkeypatch.setattr(comfy.model_management, "load_models_gpu", lambda models: None)
+
+    gc_calls = []
+    cache_calls = []
+    monkeypatch.setattr(nodes.gc, "collect", lambda: gc_calls.append(True))
+    monkeypatch.setattr(
+        comfy.model_management, "soft_empty_cache", lambda force=False: cache_calls.append(force)
+    )
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="boom"):
+        BooMossAudioGenerate.execute(
+            moss_audio_model={"patcher": patcher, "processor": _FakeProcessor()},
+            **_generate_kwargs(),
+        )
+
+    assert gc_calls == [True]
+    assert cache_calls == [True]

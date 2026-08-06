@@ -1,3 +1,4 @@
+import gc
 import logging
 import os
 import re
@@ -158,8 +159,13 @@ class BooMossAudioGenerate(io.ComfyNode):
         top_k: int,
         strip_thinking: bool,
     ) -> io.NodeOutput:
-        hf_model = moss_audio_model["model"]
+        import comfy.model_management as model_management
+
+        patcher = moss_audio_model["patcher"]
         processor = moss_audio_model["processor"]
+
+        model_management.load_models_gpu([patcher])
+        hf_model = patcher.model
 
         waveform = audio["waveform"][0].mean(dim=0)  # downmix to mono: [samples]
         sample_rate = audio["sample_rate"]
@@ -174,17 +180,27 @@ class BooMossAudioGenerate(io.ComfyNode):
             inputs["audio_data"] = inputs["audio_data"].to(hf_model.dtype)
         inputs["audio_input_mask"] = inputs["input_ids"] == processor.audio_token_id
 
-        with torch.no_grad():
-            generated_ids = hf_model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=temperature > 0.0,
-                num_beams=1,
-                temperature=max(temperature, 1e-5),
-                top_p=top_p,
-                top_k=top_k,
-                use_cache=True,
-            )
+        try:
+            with torch.no_grad():
+                generated_ids = hf_model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=temperature > 0.0,
+                    num_beams=1,
+                    temperature=max(temperature, 1e-5),
+                    top_p=top_p,
+                    top_k=top_k,
+                    use_cache=True,
+                )
+        finally:
+            # A steady-state MOSS-Audio load doesn't need to unload the model
+            # itself after every call -- load_models_gpu is idempotent, so
+            # the next call just reuses the resident weights. But transient
+            # CUDA state from this generate() call (KV cache, activations)
+            # should still be released here, including on the exception path
+            # (KeyboardInterrupt / ComfyUI's own interrupt exception).
+            gc.collect()
+            model_management.soft_empty_cache(force=True)
 
         input_len = inputs["input_ids"].shape[1]
         text = processor.decode(generated_ids[0, input_len:], skip_special_tokens=True)
