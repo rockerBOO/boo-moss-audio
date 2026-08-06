@@ -190,7 +190,7 @@ class BooMossAudioGenerate(io.ComfyNode):
         patcher = moss_audio_model["patcher"]
         processor = moss_audio_model["processor"]
 
-        model_management.load_models_gpu([patcher])
+        model_management.load_models_gpu([patcher], force_full_load=True)
         hf_model = patcher.model
 
         waveform = audio["waveform"][0].mean(dim=0)  # downmix to mono: [samples]

@@ -147,7 +147,9 @@ def test_generate_registers_patcher_with_load_models_gpu_and_uses_patcher_model(
     patcher = _FakePatcher(fake_model)
     recorded_calls = []
     monkeypatch.setattr(
-        comfy.model_management, "load_models_gpu", lambda models: recorded_calls.append(models)
+        comfy.model_management,
+        "load_models_gpu",
+        lambda models, **kwargs: recorded_calls.append((models, kwargs)),
     )
     monkeypatch.setattr(comfy.model_management, "soft_empty_cache", lambda force=False: None)
 
@@ -156,7 +158,7 @@ def test_generate_registers_patcher_with_load_models_gpu_and_uses_patcher_model(
         **_generate_kwargs(),
     )
 
-    assert recorded_calls == [[patcher]]
+    assert recorded_calls == [([patcher], {"force_full_load": True})]
     assert output.args[0] == "generated text"
 
 
@@ -169,7 +171,7 @@ def test_generate_cleans_up_without_unloading_model_on_success(monkeypatch):
             return torch.tensor([[1, 2, 3, 4, 5]])
 
     patcher = _FakePatcher(FakeHFModel())
-    monkeypatch.setattr(comfy.model_management, "load_models_gpu", lambda models: None)
+    monkeypatch.setattr(comfy.model_management, "load_models_gpu", lambda models, **kwargs: None)
 
     gc_calls = []
     cache_calls = []
@@ -226,7 +228,7 @@ def test_generate_still_cleans_up_and_reraises_on_generate_failure(monkeypatch):
             raise RuntimeError("boom")
 
     patcher = _FakePatcher(FailingHFModel())
-    monkeypatch.setattr(comfy.model_management, "load_models_gpu", lambda models: None)
+    monkeypatch.setattr(comfy.model_management, "load_models_gpu", lambda models, **kwargs: None)
 
     gc_calls = []
     cache_calls = []
