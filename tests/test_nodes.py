@@ -55,6 +55,7 @@ class _FakeHFModel(torch.nn.Module):
 
 def test_loader_wraps_model_in_model_patcher_with_pinned_dtype(monkeypatch, tmp_path):
     monkeypatch.setattr(nodes, "_local_model_dir", lambda repo_id: str(tmp_path))
+    (tmp_path / "config.json").write_text("{}")
 
     fake_model = _FakeHFModel()
     captured = {}
