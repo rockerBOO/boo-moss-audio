@@ -1,0 +1,41 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout ComfyUI
+        uses: actions/checkout@v7
+        with:
+          repository: comfyanonymous/ComfyUI
+          path: ComfyUI
+
+      - name: Checkout boo-moss-audio
+        uses: actions/checkout@v7
+        with:
+          path: ComfyUI/custom_nodes/boo-moss-audio
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install ComfyUI dependencies
+        run: pip install -r requirements.txt
+        working-directory: ComfyUI
+
+      - name: Install boo-moss-audio dependencies
+        run: pip install -r requirements.txt
+        working-directory: ComfyUI/custom_nodes/boo-moss-audio
+
+      - name: Install test dependencies
+        run: pip install pytest
+
+      - name: Run tests
+        run: pytest
+        working-directory: ComfyUI/custom_nodes/boo-moss-audio
