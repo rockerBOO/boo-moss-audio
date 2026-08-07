@@ -16,7 +16,7 @@ def test_moss_audio_survives_load_offload_reload_generate_cycle():
     """Empirically verifies MOSS-Audio's HF modules (rotary embedding caches,
     KV-cache dtype, etc.) tolerate being moved between devices post-
     construction by ModelPatcher -- the one thing code review alone can't
-    confirm (see docs/comfy-model-management-integration.md, step 7)."""
+    confirm."""
 
     load_device = model_management.get_torch_device()
 
