@@ -25,6 +25,13 @@ Wire `BOO MOSS-Audio Generate`'s `STRING` output into any downstream
 prompt-enhancement node (e.g. [boo-textgen](https://github.com/rockerboo/boo-textgen))
 to feed a transcript/mood description into further prompt generation.
 
+## Example workflow
+
+`example_workflows/basic_caption.json` — `LoadAudio` → `BOO MOSS-Audio
+Loader` + `BOO MOSS-Audio Generate` → `Preview as Text`. Load it in ComfyUI
+(Workflow → Open), pick an audio file in the `LoadAudio` node, and queue the
+prompt.
+
 ## Requirements
 
 Runs inside a ComfyUI checkout, same as any custom node package. The only

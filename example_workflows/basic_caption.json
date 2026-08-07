@@ -1,0 +1,212 @@
+{
+  "id": "boo-moss-audio-basic-caption",
+  "revision": 0,
+  "last_node_id": 5,
+  "last_link_id": 3,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "LoadAudio",
+      "pos": [
+        0,
+        0
+      ],
+      "size": [
+        320,
+        136
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "links": [
+            1
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoadAudio"
+      },
+      "widgets_values": [
+        "",
+        null,
+        null
+      ]
+    },
+    {
+      "id": 2,
+      "type": "BooMossAudioLoader",
+      "pos": [
+        0,
+        200
+      ],
+      "size": [
+        320,
+        78
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "moss_audio_model",
+          "type": "BOO_MOSS_AUDIO_MODEL",
+          "links": [
+            2
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "BooMossAudioLoader"
+      },
+      "widgets_values": [
+        "MOSS-Audio-4B-Instruct",
+        true
+      ]
+    },
+    {
+      "id": 3,
+      "type": "BooMossAudioGenerate",
+      "pos": [
+        380,
+        0
+      ],
+      "size": [
+        420,
+        480
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "moss_audio_model",
+          "type": "BOO_MOSS_AUDIO_MODEL",
+          "link": 2
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": [
+            3
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "BooMossAudioGenerate"
+      },
+      "widgets_values": [
+        "You are an audio analyst. Do BOTH of the following, in order, and do not skip either:\n1) SPEECH: Transcribe every spoken or sung word verbatim, in order. Start a new tagged block only when switching between spoken dialogue and sung lyrics, writing \"[spoken]\" or \"[sung]\" once at the start of that block, not before every line. Inside a sung block, put each lyric line on its own line (a literal line break between lines), the way song lyrics are normally printed; keep spoken dialogue in flowing prose. If there is no speech or singing at all, write \"(none)\".\n2) STYLE: Describe the musical/ambient style, genre, instrumentation, tempo, and overall mood.\nAlways include both sections, labeled exactly \"SPEECH:\" and \"STYLE:\". Never repeat the same word, phrase, or sound more than twice in a row.\n\nExample output:\nSPEECH: [spoken] Hey, are you seeing this?\n[sung]\nLights are low,\nwe're moving slow,\ndancing where the shadows grow,\nholding on to what we know.\nSTYLE: A mellow synth-pop track with a laid-back tempo, warm analog pads, and a soft four-on-the-floor beat. The mood is intimate and dreamy.\n\nNow analyze the given audio in the same format.",
+        1024,
+        1.0,
+        1.0,
+        50,
+        1.0,
+        0,
+        "fixed",
+        true
+      ]
+    },
+    {
+      "id": 4,
+      "type": "PreviewAny",
+      "pos": [
+        850,
+        0
+      ],
+      "size": [
+        420,
+        200
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "source",
+          "type": "*",
+          "link": 3
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "PreviewAny"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 5,
+      "type": "MarkdownNote",
+      "pos": [
+        0,
+        -160
+      ],
+      "size": [
+        700,
+        130
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "Note",
+      "properties": {},
+      "widgets_values": [
+        "# BOO MOSS-Audio -- basic captioning\n\nLoad an audio clip, run it through MOSS-Audio, and preview the generated speech transcript + style/mood description as text.\n\nPick an audio file in **Load Audio**, then queue the prompt. First run downloads the checkpoint to `models/moss-audio/`."
+      ],
+      "color": "#233",
+      "bgcolor": "#355"
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      3,
+      1,
+      "AUDIO"
+    ],
+    [
+      2,
+      2,
+      0,
+      3,
+      0,
+      "BOO_MOSS_AUDIO_MODEL"
+    ],
+    [
+      3,
+      3,
+      0,
+      4,
+      0,
+      "*"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 1.0,
+      "offset": [
+        0,
+        0
+      ]
+    }
+  },
+  "version": 0.4
+}
