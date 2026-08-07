@@ -32,6 +32,8 @@ Loader` + `BOO MOSS-Audio Generate` → `Preview as Text`. Load it in ComfyUI
 (Workflow → Open), pick an audio file in the `LoadAudio` node, and queue the
 prompt.
 
+<img width="1762" height="1020" alt="BOO MOSS-Audio basic captioning workflow in ComfyUI" src="https://github.com/user-attachments/assets/cb3ae9ac-d3ca-4b38-9580-cab8e3728c83" />
+
 ## Requirements
 
 Runs inside a ComfyUI checkout, same as any custom node package. The only
