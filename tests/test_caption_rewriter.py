@@ -11,30 +11,30 @@ import asyncio
 import os
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
-from boo_moss_audio.music_caption.models import (
+# Use the same import path as the agents to ensure consistent module objects
+from music_caption.models import (
     CaptionState,
     Confidence,
     AgentRole,
     IndexCard,
     SelectedReference,
 )
-from boo_moss_audio.music_caption.router import GenreRouter
-from boo_moss_audio.music_caption.template_store import TemplateStore
-from boo_moss_audio.music_caption.agents.brief_agent import BriefAgent
-from boo_moss_audio.music_caption.agents.constraints_agent import ConstraintsAgent
-from boo_moss_audio.music_caption.agents.router_agent import RouterAgent
-from boo_moss_audio.music_caption.agents.selection_agent import SelectionAgent
-from boo_moss_audio.music_caption.agents.template_reader import TemplateReader
-from boo_moss_audio.music_caption.agents.timeline_agent import TimelineAgent
-from boo_moss_audio.music_caption.agents.renderer_agent import RendererAgent
-from boo_moss_audio.music_caption import CaptionRewriter, _extract_section_tags
+from music_caption.router import GenreRouter
+from music_caption.template_store import TemplateStore
+from music_caption.agents.brief_agent import BriefAgent
+from music_caption.agents.constraints_agent import ConstraintsAgent
+from music_caption.agents.router_agent import RouterAgent
+from music_caption.agents.selection_agent import SelectionAgent
+from music_caption.agents.template_reader import TemplateReader
+from music_caption.agents.timeline_agent import TimelineAgent
+from music_caption.agents.renderer_agent import RendererAgent
+from music_caption import CaptionRewriter, _extract_section_tags
 
 # Root of the music_caption package for file I/O tests
-PACKAGE_ROOT = Path(__file__).resolve().parent / "music_caption"
+PACKAGE_ROOT = Path(__file__).resolve().parent.parent / "music_caption"
 
 
 # ---------------------------------------------------------------------------
@@ -43,7 +43,8 @@ PACKAGE_ROOT = Path(__file__).resolve().parent / "music_caption"
 
 def _mock_llm(responses: list[str]) -> dict:
     """Create a mock LLM dict that returns predetermined responses sequentially."""
-    return {"generate": lambda *a, **k: next(iter(responses))}
+    it = iter(responses)
+    return {"generate": lambda *a, **k: next(it)}
 
 
 class MockLLM:
@@ -181,7 +182,7 @@ class TestTemplateStore:
     def test_get_template_existing(self) -> None:
         store = TemplateStore()
         # Use a known template file from the bundled templates
-        sample_files = os.listdir(os.path.join(str(PACKAGE_ROOT), "music_caption", "templates"))
+        sample_files = os.listdir(os.path.join(str(PACKAGE_ROOT), "templates"))
         if not sample_files:
             pytest.skip("No templates found")
         first_file = sample_files[0]
@@ -197,7 +198,7 @@ class TestTemplateStore:
 
     def test_get_templates_multiple(self) -> None:
         store = TemplateStore()
-        sample_files = os.listdir(os.path.join(str(PACKAGE_ROOT), "music_caption", "templates"))
+        sample_files = os.listdir(os.path.join(str(PACKAGE_ROOT), "templates"))
         if len(sample_files) < 2:
             pytest.skip("Not enough templates for multi-file test")
         result = store.get_templates([sample_files[0], sample_files[1]])
@@ -205,7 +206,7 @@ class TestTemplateStore:
 
     def test_clear_cache(self) -> None:
         store = TemplateStore()
-        sample_files = os.listdir(os.path.join(str(PACKAGE_ROOT), "music_caption", "templates"))
+        sample_files = os.listdir(os.path.join(str(PACKAGE_ROOT), "templates"))
         if not sample_files:
             pytest.skip("No templates found")
         store.get_template(sample_files[0])
@@ -313,6 +314,7 @@ class TestSelectionAgent:
 
     def test_parse_response(self) -> None:
         state = _make_state()
+        state.primary_family = "pop"
         card = IndexCard(
             card_id="t1",
             style="pop",
@@ -326,7 +328,6 @@ class TestSelectionAgent:
         agent = SelectionAgent({}, state)
 
         # Manually inject a card into the router's cache
-        from boo_moss_audio.music_caption.router import GenreRouter
         original_get = GenreRouter.get_cards_for_family
 
         def mock_get(self, family):
@@ -350,7 +351,7 @@ class TestSelectionAgent:
 class TestTemplateReader:
     async def test_run_with_valid_templates(self) -> None:
         state = _make_state()
-        sample_files = os.listdir(os.path.join(str(PACKAGE_ROOT), "music_caption", "templates"))
+        sample_files = os.listdir(os.path.join(str(PACKAGE_ROOT), "templates"))
         if not sample_files:
             pytest.skip("No templates found")
 
@@ -435,9 +436,40 @@ class TestRendererAgent:
     async def test_run_with_mock_llm(self) -> None:
         state = _make_state()
         mock_llm = _mock_llm([
-            "### Global Metadata\nDeep house genre, 120 BPM.\n\n"
-            "### Vocal Details\nSoft female vocals, dreamy.\n\n"
-            "### Arrangement\nVerse starts minimal, chorus builds full.\n",
+            "### Global Metadata\n"
+            "A deep house track built on a hypnotic four-on-the-floor pulse at approximately 120 BPM "
+            "with layered analog synthesizer pads, warm sub bass, and syncopated hi-hats creating a "
+            "mesmerizing late-night club atmosphere that demands extended listening. The production "
+            "foundation uses heavily filtered loops and subtle sidechain pumping, maintaining a minor-key "
+            "harmonic bed throughout that stays understated and repetitive by deliberate design. Reverb-soaked "
+            "percussion elements and a shuffled swing groove keep the energy rolling forward without ever "
+            "feeling rushed or predictable, relying on small variations and textural shifts to carry the "
+            "emotional arc through long DJ sets. The sonic palette favors organic warmth from aged equipment "
+            "and vintage emulation, avoiding overly digital or synthetic tones that would break the hypnotic "
+            "spell. Low-end emphasis on the sub bass creates a physical, tactile sensation that connects "
+            "dancers to the groove's pulsing heartbeat, while filtered hi-hat layers add movement without "
+            "harshness.\n\n"
+            "### Vocal Details\n"
+            "A solo female vocalist with a warm, slightly dusky timbre delivers soft, breathy phrases that "
+            "sit deliberately low in the mix, functioning more as atmospheric texture than as lead melody. "
+            "Her delivery maintains a relaxed, almost conversational quality throughout, avoiding belted "
+            "power vocal techniques in favor of intimate proximity to the microphone. Light vocal chops and "
+            "carefully placed stutter edits thread between the main synth hook, creating rhythmic punctuation "
+            "without disrupting the groove. Occasional layered harmonies, voiced closely together for warmth, "
+            "and airy ad-libs drift in during chorus sections, adding perceived depth without overpowering "
+            "the carefully balanced arrangement. Reverb and delay on vocal tracks enhance the atmospheric "
+            "quality rather than creating obvious spatial effects.\n\n"
+            "### Arrangement\n"
+            "Verse section opens with a stripped-back intro built from a lone filtered analog pad and a soft, "
+            "cushioned kick pulse, gradually introducing filtered hi-hats and a rolling, slightly reedy sub "
+            "bassline that locks into the groove. The first verse layers in deep resonant bass and soft "
+            "crystalline pads, establishing the core groove's DNA while keeping the overall arrangement sparse "
+            "and hypnotic, allowing individual elements to breathe. Pre-chorus builds tension through rising "
+            "synth arpeggios and a subtle riser sweep. The chorus section brings the full arrangement online: "
+            "driving groove, layered arpeggios with slight detuning for thickness, and the vocal hook locking "
+            "together into a dense, danceable peak. A brief breakdown strips most elements away, leaving only "
+            "bass and pads. Final chorus returns with added percussion layers and enhanced vocal stacks, "
+            "closing the track on a sustained, heavily filtered outro that fades rather than stops.\n",
         ])
         agent = RendererAgent(mock_llm, state)
         await agent.run()
@@ -463,8 +495,7 @@ class TestRendererAgent:
                 "### Arrangement\nArrangement details.\n"
             )
 
-        mock_llm = MagicMock()
-        mock_llm.generate = mock_generate
+        mock_llm = {"generate": mock_generate}
 
         agent = RendererAgent(mock_llm, state)
         await agent.run()
@@ -500,17 +531,39 @@ class TestCaptionRewriterIntegration:
             "Role: Foundation\nTemplate: deep-house_0001.txt\nRationale: best match\n",
             # Stage 7: Timeline
             "[Verse] Deep bass and soft pads enter\n[Chorus] Full arrangement with synth arpeggios\n",
-            # Stage 8: Renderer
-            "### Global Metadata\nDeep house genre at moderate tempo with analog synths.\n\n"
-            "### Vocal Details\nSoft female vocals layered behind the mix.\n\n"
-            "### Arrangement\nVerse opens with deep bass and soft pads. Chorus brings full synth arpeggios and driving groove.\n",
+            # Stage 8: Renderer — long enough (200-600 words) to pass validation on the
+            # first attempt, so the pipeline calls the LLM exactly once per stage.
+            "### Global Metadata\n"
+            "A deep house track built around a driving four-on-the-floor pulse near 122 BPM, "
+            "using analog synthesizer pads, warm sub bass, and syncopated hi-hats to create a "
+            "hypnotic, late-night club atmosphere. The production favors filtered loops, subtle "
+            "sidechain pumping, and a minor-key harmonic bed that stays understated and repetitive "
+            "by design, letting small variations carry the emotional arc rather than dramatic key "
+            "changes. Reverb-soaked percussion and a shuffled groove keep the energy rolling "
+            "forward without ever feeling rushed.\n\n"
+            "### Vocal Details\n"
+            "A solo female vocalist delivers soft, breathy phrases that sit low in the mix, "
+            "functioning more as texture than lead melody. Her delivery is relaxed and "
+            "conversational, with light vocal chops and stutter edits threaded between the main "
+            "synth hook. Occasional layered harmonies and airy ad-libs drift in during the chorus "
+            "sections, adding warmth without ever overpowering the groove-driven arrangement.\n\n"
+            "### Arrangement\n"
+            "The track opens with a stripped-back intro built from a lone analog pad and a soft "
+            "kick pulse, gradually introducing filtered hi-hats and a rolling sub bassline. The "
+            "first verse layers in deep bass and soft pads, establishing the core groove while "
+            "keeping the arrangement sparse and hypnotic. The pre-chorus adds rising synth "
+            "arpeggios and a subtle riser to build anticipation. The chorus brings the full "
+            "arrangement online: driving groove, layered arpeggios, and the vocal hook locking "
+            "together into a dense, danceable peak. A brief breakdown strips elements away before "
+            "the final chorus returns with added percussion layers, closing the track on a "
+            "sustained, filtered outro.\n",
         ]
 
-        mock_llm = MagicMock()
         def gen(*args, **kwargs):
             call_depth[0] += 1
             return responses[min(call_depth[0] - 1, len(responses) - 1)]
-        mock_llm.generate = gen
+
+        mock_llm = {"generate": gen}
 
         rewriter = CaptionRewriter(mock_llm)
         result = asyncio.run(rewriter.rewrite("deep house, emotional, arpeggios", "[Verse] hello [Chorus] world"))
@@ -522,8 +575,7 @@ class TestCaptionRewriterIntegration:
 
     def test_empty_inputs(self) -> None:
         """Test that empty inputs produce a valid (minimal) caption."""
-        mock_llm = MagicMock()
-        mock_llm.generate = lambda *a, **k: ""
+        mock_llm = {"generate": lambda *a, **k: ""}
 
         rewriter = CaptionRewriter(mock_llm)
         result = asyncio.run(rewriter.rewrite("", ""))
@@ -531,8 +583,7 @@ class TestCaptionRewriterIntegration:
 
     def test_section_tags_extracted(self) -> None:
         """Verify section tags are extracted and stored in state."""
-        mock_llm = MagicMock()
-        mock_llm.generate = lambda *a, **k: ""
+        mock_llm = {"generate": lambda *a, **k: ""}
 
         rewriter = CaptionRewriter(mock_llm)
         asyncio.run(rewriter.rewrite("test", "[Verse] one [Chorus] two"))
