@@ -380,6 +380,44 @@ class TestSelectionAgent:
         finally:
             GenreRouter.get_cards_for_family = original_get
 
+    def test_parse_response_selects_matching_card_not_last(self) -> None:
+        state = _make_state()
+        state.primary_family = "pop"
+        card_a = IndexCard(card_id="a", style="pop-a", template_path="pop_a.txt")
+        card_b = IndexCard(card_id="b", style="pop-b", template_path="pop_b.txt")
+        agent = SelectionAgent({}, state)
+
+        original_get = GenreRouter.get_cards_for_family
+        GenreRouter.get_cards_for_family = (
+            lambda self, family: [card_a, card_b] if "pop" in family.lower() else []
+        )
+
+        try:
+            response = "Role: Foundation\nTemplate: pop_a.txt\nRationale: best match\n"
+            result = agent.parse_response(response)
+            assert len(result.selected_references) == 1
+            assert result.selected_references[0].card_id == "a"
+        finally:
+            GenreRouter.get_cards_for_family = original_get
+
+    def test_parse_response_no_match_skips_reference(self) -> None:
+        state = _make_state()
+        state.primary_family = "pop"
+        card_a = IndexCard(card_id="a", style="pop-a", template_path="pop_a.txt")
+        agent = SelectionAgent({}, state)
+
+        original_get = GenreRouter.get_cards_for_family
+        GenreRouter.get_cards_for_family = (
+            lambda self, family: [card_a] if "pop" in family.lower() else []
+        )
+
+        try:
+            response = "Role: Foundation\nTemplate: nonexistent.txt\nRationale: no real match\n"
+            result = agent.parse_response(response)
+            assert result.selected_references == []
+        finally:
+            GenreRouter.get_cards_for_family = original_get
+
 
 class TestTemplateReader:
     async def test_run_with_valid_templates(self) -> None:

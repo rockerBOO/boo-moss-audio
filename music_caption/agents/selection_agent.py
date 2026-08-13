@@ -71,6 +71,13 @@ class SelectionAgent(BaseAgent):
         )
         return self._sanitize(prompt)
 
+    @staticmethod
+    def _find_card(cards, template_path: str):
+        for card in cards:
+            if card.template_path == template_path:
+                return card
+        return None
+
     def parse_response(self, response: str) -> CaptionState:
         state = self.state
         state.selected_references = []
@@ -104,16 +111,13 @@ class SelectionAgent(BaseAgent):
             template_path = template_match.group(1).strip()
 
             # Find the card for this template
-            card = None
-            for card in router.get_cards_for_family(state.primary_family):
-                if card.template_path == template_path:
-                    card = card
-                    break
-            if not card and state.secondary_family:
-                for card in router.get_cards_for_family(state.secondary_family):
-                    if card.template_path == template_path:
-                        card = card
-                        break
+            card = self._find_card(
+                router.get_cards_for_family(state.primary_family), template_path
+            )
+            if card is None and state.secondary_family:
+                card = self._find_card(
+                    router.get_cards_for_family(state.secondary_family), template_path
+                )
 
             if card is None:
                 continue
