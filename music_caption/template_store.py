@@ -18,14 +18,22 @@ class TemplateStore:
         self._warnings: list[str] = []
 
     def get_template(self, template_path: str) -> str | None:
-        """Load a single template by its relative path (e.g. 'ballad-cinematic-pop_0001.txt').
+        """Load a single template by its relative path.
+
+        Accepts paths with or without the bundled `templates/` prefix (e.g.
+        both 'templates/ballad-cinematic-pop_0001.txt' and
+        'ballad-cinematic-pop_0001.txt' resolve to the same file).
 
         Returns the template content or None if not found.
         """
         if template_path in self._cache:
             return self._cache[template_path]
 
-        full_path = os.path.join(self._templates_dir, template_path)
+        normalized = template_path.replace("\\", "/")
+        if normalized.startswith("templates/"):
+            normalized = normalized[len("templates/"):]
+
+        full_path = os.path.join(self._templates_dir, normalized)
         if not os.path.isfile(full_path):
             msg = f"Template not found: {template_path}"
             self._warnings.append(msg)

@@ -238,6 +238,15 @@ class TestTemplateStore:
         store.clear_cache()
         assert len(store._cache) == 0
 
+    def test_get_template_via_real_router_card(self) -> None:
+        router = GenreRouter()
+        cards = router.get_cards_for_family("east-asian-modern")
+        assert cards, "expected at least one real card to test against"
+        store = TemplateStore()
+        content = store.get_template(cards[0].template_path)
+        assert content is not None
+        assert len(content) > 0
+
 
 # ---------------------------------------------------------------------------
 # Agent tests
