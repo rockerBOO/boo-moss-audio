@@ -34,7 +34,7 @@ jobs:
         working-directory: ComfyUI/custom_nodes/boo-moss-audio
 
       - name: Install test dependencies
-        run: pip install pytest
+        run: pip install "pytest>=8.0.0" "pytest-asyncio>=0.24.0"
 
       - name: Run tests
         run: pytest
