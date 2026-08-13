@@ -24,6 +24,7 @@ from music_caption.models import (
 )
 from music_caption.router import GenreRouter
 from music_caption.template_store import TemplateStore
+from music_caption.agents.base import BaseAgent
 from music_caption.agents.brief_agent import BriefAgent
 from music_caption.agents.constraints_agent import ConstraintsAgent
 from music_caption.agents.router_agent import RouterAgent
@@ -659,3 +660,54 @@ class TestCaptionRewriterIntegration:
         rewriter = CaptionRewriter(mock_llm)
         asyncio.run(rewriter.rewrite("test", "[Verse] one [Chorus] two"))
         assert rewriter.state.explicit_sections == ["Verse", "Chorus"]
+
+
+class TestStageWarnings:
+    """Stage-failure warnings must survive to the final caption, not get overwritten."""
+
+    async def test_run_stage_records_warning_after_two_failures(self) -> None:
+        class AlwaysFailAgent(BaseAgent):
+            def build_prompt(self) -> str:
+                return ""
+
+            def parse_response(self, response: str) -> CaptionState:
+                return self.state
+
+            async def run(self) -> CaptionState:
+                raise RuntimeError("boom")
+
+        rewriter = CaptionRewriter({})
+        await rewriter._run_stage(AlwaysFailAgent, "kw", "", "FakeStage")
+        assert rewriter.state.stage_warnings == ["FakeStage failed after 2 attempts: boom"]
+
+    def test_warning_survives_when_later_stage_succeeds(self) -> None:
+        """A BriefAgent failure must still show up in the final caption even though
+        RendererAgent (the last stage) succeeds and writes its own final_caption."""
+        call_count = [0]
+        success_responses = [
+            # ConstraintsAgent
+            "genre: deep house (from user input)\n",
+            # RouterAgent
+            "Primary: deep-house\nSecondary: none\n",
+            # SelectionAgent
+            "Role: Foundation\nTemplate: deep-house_0001.txt\nRationale: best match\n",
+            # TimelineAgent
+            "[Verse] Deep bass and soft pads enter\n",
+            # RendererAgent — long enough to pass validation on the first attempt
+            "### Global Metadata\n" + ("Deep house track with analog synths. " * 20) + "\n\n"
+            "### Vocal Details\n" + ("Soft layered female vocals. " * 20) + "\n\n"
+            "### Arrangement\n" + ("Verse builds steadily into the chorus. " * 20) + "\n",
+        ]
+
+        def gen(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] <= 2:
+                # BriefAgent's two attempts both fail
+                raise RuntimeError("boom")
+            return success_responses[call_count[0] - 3]
+
+        rewriter = CaptionRewriter({"generate": gen})
+        result = asyncio.run(rewriter.rewrite("deep house", ""))
+
+        assert "[Warning: BriefAgent failed after 2 attempts: boom]" in result
+        assert "### Global Metadata" in result

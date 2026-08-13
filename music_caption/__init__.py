@@ -48,11 +48,9 @@ class CaptionRewriter:
             except Exception as exc:
                 if attempt == 0:
                     continue
-                warning = f"[{stage_name} failed after 2 attempts: {exc}]"
-                if self.state.final_caption:
-                    self.state.final_caption += "\n\n" + warning
-                else:
-                    self.state.final_caption = f"[{stage_name} failed: {exc}]"
+                self.state.stage_warnings.append(
+                    f"{stage_name} failed after 2 attempts: {exc}"
+                )
         return self.state
 
     async def rewrite(self, style_keywords: str, lyrics: str) -> str:
@@ -79,11 +77,7 @@ class CaptionRewriter:
                 lyrics=lyrics,
             ).run()
         except Exception as exc:
-            warning = f"[TemplateReader failed: {exc}]"
-            if self.state.final_caption:
-                self.state.final_caption += "\n\n" + warning
-            else:
-                self.state.final_caption = warning
+            self.state.stage_warnings.append(f"TemplateReader failed: {exc}")
 
         self.state = await self._run_stage(
             TimelineAgent, style_keywords, lyrics, "TimelineAgent"
@@ -92,4 +86,10 @@ class CaptionRewriter:
             RendererAgent, style_keywords, lyrics, "RendererAgent"
         )
 
-        return self.state.final_caption
+        caption = self.state.final_caption
+        if self.state.stage_warnings:
+            warnings_block = "\n".join(
+                f"[Warning: {w}]" for w in self.state.stage_warnings
+            )
+            caption = f"{caption}\n\n{warnings_block}" if caption else warnings_block
+        return caption

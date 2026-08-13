@@ -124,3 +124,5 @@ class CaptionState:
         self.final_caption: str = ""
         # Track which sections were explicitly requested from lyrics
         self.explicit_sections: list[str] = []
+        # Warnings recorded when a stage fails but the pipeline continues
+        self.stage_warnings: list[str] = []
