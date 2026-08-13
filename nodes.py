@@ -1,3 +1,4 @@
+import asyncio
 import gc
 import logging
 import os
@@ -112,8 +113,8 @@ class BooMossAudioLoader(io.ComfyNode):
 
     @classmethod
     def execute(cls, model: str, enable_time_marker: bool) -> io.NodeOutput:
-        import comfy.model_management as model_management
         import comfy.model_patcher
+        from comfy import model_management
         from huggingface_hub import snapshot_download
 
         repo_id = MOSS_AUDIO_REPOS[model]
@@ -220,7 +221,7 @@ Now analyze the given audio in the same format.""",
         seed: int,
         strip_thinking: bool,
     ) -> io.NodeOutput:
-        import comfy.model_management as model_management
+        from comfy import model_management
 
         patcher = moss_audio_model["patcher"]
         processor = moss_audio_model["processor"]
@@ -277,12 +278,65 @@ Now analyze the given audio in the same format.""",
         return io.NodeOutput(text)
 
 
+class BooMusicCaptionRewriter(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="BooMusicCaptionRewriter",
+            display_name="BOO Music Caption Rewriter",
+            category="audio",
+            description=(
+                "Takes style keywords and optional lyrics, routes through a bundled "
+                "MiniMax Music 3 reference library using an external LLM with an "
+                "8-stage agent pipeline, and returns a structured caption (Global "
+                "Metadata, Vocal Details, Arrangement)."
+            ),
+            inputs=[
+                io.Object.Input(
+                    "llm_model",
+                    tooltip="External LLM model (e.g., Gemma).",
+                ),
+                io.String.Input(
+                    "style_keywords",
+                    multiline=True,
+                    default="",
+                    tooltip=(
+                        "Style description: genres, moods, instrumentation, "
+                        "cultural cues, fusion combinations."
+                    ),
+                ),
+                io.String.Input(
+                    "lyrics",
+                    multiline=True,
+                    default="",
+                    tooltip="Optional lyrics with bracketed section tags like [Verse], [Chorus].",
+                ),
+            ],
+            outputs=[io.String.Output("caption")],
+            search_aliases=["music caption", "mini max", "minimax", "template", "reference"],
+        )
+
+    @classmethod
+    def execute(
+        cls,
+        llm_model: dict,
+        style_keywords: str,
+        lyrics: str,
+    ) -> io.NodeOutput:
+        from music_caption import CaptionRewriter
+
+        rewriter = CaptionRewriter(llm_model)
+        caption = asyncio.run(rewriter.rewrite(style_keywords, lyrics))
+        return io.NodeOutput(caption)
+
+
 class BooMossAudioExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
             BooMossAudioLoader,
             BooMossAudioGenerate,
+            BooMusicCaptionRewriter,
         ]
 
 
