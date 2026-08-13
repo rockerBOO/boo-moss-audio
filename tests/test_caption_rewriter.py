@@ -177,6 +177,30 @@ class TestGenreRouter:
         # Unknown term passes through unchanged
         assert router.normalize_alias("unknown_thing_xyz") == "unknown_thing_xyz"
 
+    def test_get_cards_for_family_returns_real_cards(self) -> None:
+        router = GenreRouter()
+        cards = router.get_cards_for_family("east-asian-modern")
+        assert len(cards) > 0
+        assert all(card.template_path for card in cards)
+
+    def test_family_map_has_no_markdown_artifacts(self) -> None:
+        router = GenreRouter()
+        router._load_all()
+        assert router._family_map, "family map should not be empty"
+        for route, index_name in router._family_map.items():
+            assert "`" not in route
+            assert "[" not in index_name and "(" not in index_name
+            assert index_name in router._indexes
+
+    def test_aliases_have_no_header_row(self) -> None:
+        router = GenreRouter()
+        router._load_all()
+        assert "User wording" not in router._aliases
+
+    def test_normalize_alias_known_term(self) -> None:
+        router = GenreRouter()
+        assert router.normalize_alias("华语流行、国语流行") == "Mandopop / C-pop"
+
 
 class TestTemplateStore:
     def test_get_template_existing(self) -> None:

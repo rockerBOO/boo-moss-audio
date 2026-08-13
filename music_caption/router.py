@@ -46,37 +46,49 @@ class GenreRouter:
 
     def _parse_router(self, text: str) -> None:
         """Parse the family map and alias tables from genre-router.md."""
-        # Parse family map table (between first and second '##' headers after "Family map")
-        in_family_map = False
-        for line in text.splitlines():
-            if "## Family map" in line:
-                in_family_map = True
-                continue
-            if in_family_map and line.startswith("## "):
-                break
-            if in_family_map and line.startswith("|---"):
-                continue
-            if in_family_map and line.startswith("|"):
-                parts = [p.strip() for p in line.strip("|").split("|")]
-                if len(parts) >= 4:
-                    route = parts[0]
-                    index = parts[3]
-                    self._family_map[route] = index
+        self._family_map = self._parse_table(text, "## Family map", key_col=0, value_col=3)
+        self._aliases = self._parse_table(text, "## Common aliases", key_col=0, value_col=1)
 
-        # Parse common aliases table
-        in_aliases = False
+    def _parse_table(
+        self, text: str, section_header: str, key_col: int, value_col: int
+    ) -> dict[str, str]:
+        """Parse a markdown table under `section_header` into a key/value dict.
+
+        Skips the header row and the `|---` separator row — only rows after
+        the separator are treated as data.
+        """
+        result: dict[str, str] = {}
+        in_section = False
+        table_started = False
         for line in text.splitlines():
-            if "## Common aliases" in line:
-                in_aliases = True
+            if section_header in line:
+                in_section = True
+                table_started = False
                 continue
-            if in_aliases and line.startswith("## "):
+            if in_section and line.startswith("## "):
                 break
-            if in_aliases and line.startswith("|---"):
+            if not in_section:
                 continue
-            if in_aliases and line.startswith("|"):
-                parts = [p.strip() for p in line.strip("|").split("|")]
-                if len(parts) >= 2:
-                    self._aliases[parts[0]] = parts[1]
+            if line.startswith("|---") or line.startswith("| ---"):
+                table_started = True
+                continue
+            if not table_started or not line.startswith("|"):
+                continue
+            parts = [p.strip() for p in line.strip("|").split("|")]
+            if len(parts) <= max(key_col, value_col):
+                continue
+            key = parts[key_col].strip("`")
+            value = self._extract_link_target(parts[value_col])
+            result[key] = value
+        return result
+
+    @staticmethod
+    def _extract_link_target(text: str) -> str:
+        """Extract the target from a markdown link `[text](target)`, else return the text as-is."""
+        match = re.search(r"\(([^)]+)\)", text)
+        if match:
+            return match.group(1)
+        return text.strip("`")
 
     def _parse_index(self, content: str, filename: str) -> list[IndexCard]:
         """Parse compact cards from an index file.
