@@ -25,19 +25,43 @@ DEBUG_NAN_CHECKS = False
 
 
 class SinusoidsPositionEmbedding(nn.Module):
+    # inv_timescales used to be a `persistent=False` registered buffer,
+    # cached at __init__ time as a micro-optimization. persistent=False
+    # means it's excluded from state_dict(), so nothing in a
+    # checkpoint-driven weight-loading path (HF's meta-device deferred
+    # init, or a host app's own weight-casting/device-placement pass that
+    # walks the state_dict) has a reason to touch it. Intermittently, it
+    # was observed on GPU with correct shape/dtype/device but garbage
+    # values (e.g. min=-1.89e38, max=9.18e-39 -- nowhere near the
+    # buffer's true (0, 1] range), consistent with the tensor being
+    # materialized as uninitialized memory rather than the real computed
+    # values. `arange(seq_len) * garbage` then overflows float32 to
+    # +/-inf, and sin/cos of that is nan, poisoning every layer
+    # downstream. It's cheap to compute (320 floats, one exp call) and
+    # depends only on this call's arguments, so recompute it fresh on
+    # every forward instead of caching it anywhere that a weight-loading
+    # path could leave stale or uninitialized.
     def __init__(self, num_positions: int, embedding_dim: int):
         super().__init__()
-        max_timescale = 10000.0
-        log_timescale_increment = math.log(max_timescale) / (embedding_dim // 2 - 1)
-        inv_timescales = torch.exp(
-            -log_timescale_increment * torch.arange(embedding_dim // 2).float()
-        )
-        self.register_buffer("inv_timescales", inv_timescales, persistent=False)
+        self.embedding_dim = embedding_dim
+        self.max_timescale = 10000.0
 
     def forward(self, seq_len: int, device: torch.device):
+        log_timescale_increment = math.log(self.max_timescale) / (self.embedding_dim // 2 - 1)
+        inv_timescales = torch.exp(
+            -log_timescale_increment
+            * torch.arange(self.embedding_dim // 2, device=device, dtype=torch.float32)
+        )
+        if DEBUG_NAN_CHECKS:
+            print(
+                f"[DEBUG] inv_timescales isfinite={bool(torch.isfinite(inv_timescales).all())} "
+                f"device={inv_timescales.device} dtype={inv_timescales.dtype} "
+                f"shape={tuple(inv_timescales.shape)} "
+                f"min={inv_timescales.min().item()} max={inv_timescales.max().item()}"
+            )
         scaled_time = torch.arange(
-            seq_len, device=device, dtype=self.inv_timescales.dtype
-        ).unsqueeze(1) * self.inv_timescales.unsqueeze(0)
+            seq_len, device=device, dtype=inv_timescales.dtype
+        ).unsqueeze(1) * inv_timescales.unsqueeze(0)
         sin_emb = torch.sin(scaled_time)
         cos_emb = torch.cos(scaled_time)
         pos_emb = torch.cat([sin_emb, cos_emb], dim=1)
@@ -140,10 +164,20 @@ class MossAudioEncoder(nn.Module):
             x = x[:, :max_len, :]
 
         if DEBUG_NAN_CHECKS:
-            print(f"[DEBUG] post-conv-stem x isfinite={bool(torch.isfinite(x).all())} shape={tuple(x.shape)}")
+            print(
+                f"[DEBUG] post-conv-stem x isfinite={bool(torch.isfinite(x).all())} shape={tuple(x.shape)} "
+                f"min={x.min().item()} max={x.max().item()} absmax={x.abs().max().item()} "
+                f"bf16_max={torch.finfo(x.dtype).max}"
+            )
 
         positions = self.embed_positions(x.shape[1], x.device)
-        x = x + positions.to(x.dtype)
+        positions_cast = positions.to(x.dtype)
+        if DEBUG_NAN_CHECKS:
+            print(
+                f"[DEBUG] positions isfinite={bool(torch.isfinite(positions_cast).all())} "
+                f"min={positions_cast.min().item()} max={positions_cast.max().item()}"
+            )
+        x = x + positions_cast
         if DEBUG_NAN_CHECKS:
             print(f"[DEBUG] post-positions x isfinite={bool(torch.isfinite(x).all())}")
 
