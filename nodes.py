@@ -45,6 +45,12 @@ MOSS_AUDIO_REPOS = {
 # consumers want the answer only, so BooMossAudioGenerate strips it by default.
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
+# MiniMax Music 3 prompt generation splits the model's single response into
+# two ComfyUI outputs. Each regex captures everything after its label up to
+# the next label (or end of string); DOTALL so section text can span lines.
+_LYRICS_RE = re.compile(r"LYRICS:\s*(.*?)(?=STRUCTURED CAPTION:|\Z)", re.DOTALL)
+_CAPTION_RE = re.compile(r"STRUCTURED CAPTION:\s*(.*)", re.DOTALL)
+
 
 def _local_model_dir(repo_id: str) -> str:
     folder = folder_paths.get_folder_paths(MOSS_AUDIO_FOLDER)[0]

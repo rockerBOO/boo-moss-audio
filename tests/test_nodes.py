@@ -44,6 +44,49 @@ def test_think_block_regex_strips_reasoning_but_keeps_the_answer():
     assert stripped == "The clip is upbeat pop music."
 
 
+_LYRICS_RE = nodes._LYRICS_RE
+_CAPTION_RE = nodes._CAPTION_RE
+
+
+def test_lyrics_and_caption_regexes_split_both_labeled_sections():
+    text = (
+        "LYRICS:\n"
+        "[verse]\n"
+        "Lights are low\n"
+        "STRUCTURED CAPTION:\n"
+        "Global Metadata\n"
+        "A mellow synth-pop track."
+    )
+    lyrics_match = _LYRICS_RE.search(text)
+    caption_match = _CAPTION_RE.search(text)
+    assert lyrics_match.group(1).strip() == "[verse]\nLights are low"
+    assert caption_match.group(1).strip() == "Global Metadata\nA mellow synth-pop track."
+
+
+def test_lyrics_regex_returns_none_when_only_caption_present():
+    text = "STRUCTURED CAPTION:\nA mellow synth-pop track."
+    assert _LYRICS_RE.search(text) is None
+    assert _CAPTION_RE.search(text).group(1).strip() == "A mellow synth-pop track."
+
+
+def test_caption_regex_returns_none_when_only_lyrics_present():
+    text = "LYRICS:\n[verse]\nLights are low"
+    assert _LYRICS_RE.search(text).group(1).strip() == "[verse]\nLights are low"
+    assert _CAPTION_RE.search(text) is None
+
+
+def test_both_regexes_return_none_when_neither_label_present():
+    text = "The model produced plain unlabeled text."
+    assert _LYRICS_RE.search(text) is None
+    assert _CAPTION_RE.search(text) is None
+
+
+def test_lyrics_regex_handles_empty_section_between_labels():
+    text = "LYRICS:\nSTRUCTURED CAPTION:\nSome caption text."
+    assert _LYRICS_RE.search(text).group(1).strip() == ""
+    assert _CAPTION_RE.search(text).group(1).strip() == "Some caption text."
+
+
 MossAudioModel = nodes.MossAudioModel
 MossAudioProcessor = nodes.MossAudioProcessor
 
