@@ -8,6 +8,7 @@ import torch
 nodes = sys.modules["boo_moss_audio_nodes"]
 BooMossAudioLoader = nodes.BooMossAudioLoader
 BooMossAudioGenerate = nodes.BooMossAudioGenerate
+BooMossAudioMiniMaxMusic3PromptGenerate = nodes.BooMossAudioMiniMaxMusic3PromptGenerate
 MOSS_AUDIO_REPOS = nodes.MOSS_AUDIO_REPOS
 _local_model_dir = nodes._local_model_dir
 _THINK_BLOCK_RE = nodes._THINK_BLOCK_RE
@@ -291,3 +292,69 @@ def test_generate_still_cleans_up_and_reraises_on_generate_failure(monkeypatch):
 
     assert gc_calls == [True]
     assert cache_calls == [True]
+
+
+def test_minimax_prompt_generate_schema_has_two_string_outputs():
+    schema = BooMossAudioMiniMaxMusic3PromptGenerate.define_schema()
+    inputs_by_id = {i.id: i for i in schema.inputs}
+    assert inputs_by_id["moss_audio_model"].io_type == "BOO_MOSS_AUDIO_MODEL"
+    assert inputs_by_id["audio"].io_type == "AUDIO"
+    assert [o.io_type for o in schema.outputs] == ["STRING", "STRING"]
+    assert [o.id for o in schema.outputs] == ["lyrics", "structured_caption"]
+
+
+def test_minimax_prompt_generate_splits_labeled_output_into_two_results(monkeypatch):
+    patcher = _FakePatcher(
+        SimpleNamespace(
+            device="cpu",
+            dtype=torch.float32,
+            generate=lambda **kwargs: torch.tensor([[1, 2, 3, 4, 5]]),
+        )
+    )
+    monkeypatch.setattr(comfy.model_management, "load_models_gpu", lambda models, **kwargs: None)
+
+    class _LabeledProcessor(_FakeProcessor):
+        def decode(self, ids, skip_special_tokens=True):
+            return (
+                "LYRICS:\n[verse]\nLights are low\n"
+                "STRUCTURED CAPTION:\nA mellow synth-pop track."
+            )
+
+    output = BooMossAudioMiniMaxMusic3PromptGenerate.execute(
+        moss_audio_model={"patcher": patcher, "processor": _LabeledProcessor()},
+        **_generate_kwargs(),
+    )
+
+    assert output.args[0] == "[verse]\nLights are low"
+    assert output.args[1] == "A mellow synth-pop track."
+
+
+def test_minimax_prompt_generate_returns_empty_string_for_missing_label(monkeypatch):
+    patcher = _FakePatcher(
+        SimpleNamespace(
+            device="cpu",
+            dtype=torch.float32,
+            generate=lambda **kwargs: torch.tensor([[1, 2, 3, 4, 5]]),
+        )
+    )
+    monkeypatch.setattr(comfy.model_management, "load_models_gpu", lambda models, **kwargs: None)
+
+    class _CaptionOnlyProcessor(_FakeProcessor):
+        def decode(self, ids, skip_special_tokens=True):
+            return "STRUCTURED CAPTION:\nA mellow synth-pop track."
+
+    output = BooMossAudioMiniMaxMusic3PromptGenerate.execute(
+        moss_audio_model={"patcher": patcher, "processor": _CaptionOnlyProcessor()},
+        **_generate_kwargs(),
+    )
+
+    assert output.args[0] == ""
+    assert output.args[1] == "A mellow synth-pop track."
+
+
+def test_minimax_prompt_generate_is_registered_in_extension_node_list():
+    import asyncio
+
+    extension = nodes.BooMossAudioExtension()
+    node_list = asyncio.run(extension.get_node_list())
+    assert BooMossAudioMiniMaxMusic3PromptGenerate in node_list

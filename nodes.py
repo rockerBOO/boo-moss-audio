@@ -311,6 +311,164 @@ Now analyze the given audio in the same format.""",
         return io.NodeOutput(text)
 
 
+class BooMossAudioMiniMaxMusic3PromptGenerate(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="BooMossAudioMiniMaxMusic3PromptGenerate",
+            display_name="BOO MOSS-Audio MiniMax Music 3 Prompt Generate",
+            category="audio",
+            description=(
+                "Runs a MOSS-Audio model over a reference audio clip and returns "
+                "the two inputs MiniMax Music 3 consumes: lyrics (with section "
+                "tags) and a structured caption (Global Metadata, Vocal Details, "
+                "Arrangement), split into separate outputs."
+            ),
+            inputs=[
+                BooMossAudioModel.Input("moss_audio_model"),
+                io.Audio.Input("audio"),
+                io.String.Input(
+                    "prompt",
+                    multiline=True,
+                    default="""You are an audio analyst. Your job is to convert an audio clip into the two inputs
+MiniMax Music 3 actually consumes: **LYRICS** and **STRUCTURED CAPTION**. Do BOTH,
+in order, and do not skip either.
+
+---
+
+## 1) LYRICS
+
+Transcribe every sung word verbatim, in order, and lay it out using MiniMax's
+section-tag contract:
+
+- Break the song into sections using only these tags, in whatever order they
+  actually occur: `[intro] [verse] [pre-chorus] [chorus] [post-chorus] [bridge]
+  [instrumental] [solo] [outro]`.
+- **Every tag goes on its own line, with nothing else on that line.** Text placed
+  on the same line as a tag is silently dropped by MiniMax's input contract, so
+  never write `[verse] Morning light…` — the tag and the lyric must be on
+  separate lines.
+- Under each tag, write the sung lyric lines exactly as sung, one line per line
+  break, the way lyrics are normally printed.
+- Instrumental passages (solos, breakdowns with no vocal) get their own
+  `[instrumental]` or `[solo]` tag and no lyric text underneath.
+- If a section repeats near-verbatim (e.g. a repeated chorus), still transcribe
+  it in full under its own tag — don't abbreviate with "repeat chorus."
+- Never repeat the same word, phrase, or sound more than twice in a row, even if
+  that's what's audibly sung (e.g. long ad-lib repetitions) — cap it at two and
+  note the effect in STRUCTURED CAPTION instead (e.g. "extended repeated ad-lib
+  outro") rather than transcribing it exhaustively.
+- If there is **spoken (non-sung) dialogue**, note that MiniMax's lyric field has
+  no native tag for it. Transcribe it separately, after the tagged lyric block,
+  under a clearly marked heading `Spoken dialogue (not part of MiniMax lyric
+  input):`, in flowing prose, so the information isn't lost — but do not mix it
+  into the tagged section above.
+- If there is no speech or singing at all, write "(none)" for this whole section.
+
+## 2) STRUCTURED CAPTION
+
+Describe the music using exactly these three headings, in this order, ~250–450
+words total. This is the field that carries all musical control in MiniMax — the
+model follows it over time, not as one global tag.
+
+**Global Metadata**
+- Basic Attributes: genre/subgenres, tempo (exact BPM only if genuinely
+  confident; otherwise a qualitative tempo like "driving" or "unhurried"), and
+  key/scale only if clearly identifiable.
+- Global Emotional Progression: the arc from open to close as a story — where it
+  starts, where it peaks, how it resolves.
+- Application Scenarios & Imagery: a concrete scene the track evokes.
+- Sonics & Production Profile: stereo width, frequency balance, dynamics
+  (polished/compressed vs. natural/uncompressed).
+
+**Vocal Details** (omit this heading's content and state "instrumental — no
+vocal, lead melody carried by [instrument]" if there's no singing)
+- Vocal Gender & Timbre: explicit, e.g. "Singer A (Female), warm mezzo-soprano."
+- Vocal Style: delivery per section — restrained in verse, belted in chorus, etc.
+- Harmony/Backing Vocals: doubles, stacked harmonies, call-and-response, and where.
+- Vocal FX: reverb, delay, saturation — only where actually audible.
+
+**Arrangement**
+- Instrument Lifecycle (Primary/Secondary): what anchors the track start to
+  finish, what enters/exits/transforms along the way.
+- Groove & Foundation Progression: what the rhythm section does per section —
+  verse vs. chorus vs. bridge.
+- Embellishments, Textures & Spatial FX: risers, sweeps, reverb tails, ear candy.
+
+---
+
+## Rules
+
+- Label the two outputs exactly `LYRICS:` and `STRUCTURED CAPTION:`.
+- Don't fabricate precision (exact BPM/key) you're not confident about.
+- An explicit vocal gender, instrumental requirement, or exclusion stated once
+  must not be contradicted later in the caption.
+- Keep the caption describing *music*, not words — lyric content stays in the
+  LYRICS section only.
+- Write the Global Emotional Progression as a story with tension, release, and
+  climax, not a static list of adjectives.""",
+                ),
+                io.Int.Input("max_new_tokens", default=1024, min=1, max=8192),
+                io.Float.Input("temperature", default=1.0, min=0.0, max=2.0, step=0.01),
+                io.Float.Input("top_p", default=1.0, min=0.0, max=1.0, step=0.01),
+                io.Int.Input("top_k", default=50, min=0, max=500),
+                io.Float.Input("repetition_penalty", default=1.0, min=1.0, max=2.0, step=0.01),
+                io.Int.Input(
+                    "seed",
+                    default=0,
+                    min=0,
+                    max=0xFFFFFFFFFFFFFFFF,
+                    control_after_generate=True,
+                    tooltip="Seed for sampling (only affects output when temperature > 0).",
+                ),
+                io.Boolean.Input(
+                    "strip_thinking",
+                    default=True,
+                    tooltip="Remove <think>...</think> reasoning blocks from Thinking-variant output.",
+                ),
+            ],
+            outputs=[
+                io.String.Output("lyrics"),
+                io.String.Output("structured_caption"),
+            ],
+        )
+
+    @classmethod
+    def execute(
+        cls,
+        moss_audio_model: dict,
+        audio: dict,
+        prompt: str,
+        max_new_tokens: int,
+        temperature: float,
+        top_p: float,
+        top_k: int,
+        repetition_penalty: float,
+        seed: int,
+        strip_thinking: bool,
+    ) -> io.NodeOutput:
+        text = _run_moss_audio_generate(
+            moss_audio_model=moss_audio_model,
+            audio=audio,
+            prompt=prompt,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            repetition_penalty=repetition_penalty,
+            seed=seed,
+            strip_thinking=strip_thinking,
+        )
+
+        lyrics_match = _LYRICS_RE.search(text)
+        lyrics = lyrics_match.group(1).strip() if lyrics_match else ""
+
+        caption_match = _CAPTION_RE.search(text)
+        structured_caption = caption_match.group(1).strip() if caption_match else ""
+
+        return io.NodeOutput(lyrics, structured_caption)
+
+
 class BooMusicCaptionRewriter(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -369,6 +527,7 @@ class BooMossAudioExtension(ComfyExtension):
         return [
             BooMossAudioLoader,
             BooMossAudioGenerate,
+            BooMossAudioMiniMaxMusic3PromptGenerate,
             BooMusicCaptionRewriter,
         ]
 
