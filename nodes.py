@@ -51,6 +51,75 @@ def _local_model_dir(repo_id: str) -> str:
     return os.path.join(folder, repo_id.split("/", 1)[1])
 
 
+def _run_moss_audio_generate(
+    moss_audio_model: dict,
+    audio: dict,
+    prompt: str,
+    max_new_tokens: int,
+    temperature: float,
+    top_p: float,
+    top_k: int,
+    repetition_penalty: float,
+    seed: int,
+    strip_thinking: bool,
+) -> str:
+    import comfy.model_management as model_management
+
+    patcher = moss_audio_model["patcher"]
+    processor = moss_audio_model["processor"]
+
+    model_management.load_models_gpu([patcher], force_full_load=True)
+    hf_model = patcher.model
+
+    waveform = audio["waveform"][0].mean(dim=0)  # downmix to mono: [samples]
+    sample_rate = audio["sample_rate"]
+    target_sr = processor.config.mel_sr
+    if sample_rate != target_sr:
+        waveform = torchaudio.functional.resample(waveform, sample_rate, target_sr)
+    raw_audio = waveform.cpu().numpy()
+
+    inputs = processor(text=prompt, audios=[raw_audio], return_tensors="pt")
+    inputs = inputs.to(hf_model.device)
+    if inputs.get("audio_data") is not None:
+        inputs["audio_data"] = inputs["audio_data"].to(hf_model.dtype)
+    inputs["audio_input_mask"] = inputs["input_ids"] == processor.audio_token_id
+
+    # transformers' GenerationMixin.generate() has no `generator` kwarg --
+    # sampling draws from torch's global RNG, so seeding it here is the
+    # only way to make do_sample=True runs reproducible.
+    torch.manual_seed(seed)
+
+    try:
+        with torch.no_grad():
+            generated_ids = hf_model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=temperature > 0.0,
+                num_beams=1,
+                temperature=max(temperature, 1e-5),
+                top_p=top_p,
+                top_k=top_k,
+                repetition_penalty=repetition_penalty,
+                use_cache=True,
+            )
+    finally:
+        # A steady-state MOSS-Audio load doesn't need to unload the model
+        # itself after every call -- load_models_gpu is idempotent, so
+        # the next call just reuses the resident weights. But transient
+        # CUDA state from this generate() call (KV cache, activations)
+        # should still be released here, including on the exception path
+        # (KeyboardInterrupt / ComfyUI's own interrupt exception).
+        gc.collect()
+        model_management.soft_empty_cache(force=True)
+
+    input_len = inputs["input_ids"].shape[1]
+    text = processor.decode(generated_ids[0, input_len:], skip_special_tokens=True)
+    if strip_thinking:
+        text = _THINK_BLOCK_RE.sub("", text).strip()
+
+    return text
+
+
 def _make_device_settable(model):
     """comfy.model_patcher.ModelPatcher assigns directly to `model.device`
     during offload/reload (comfy/model_patcher.py:346,348,1095,1149,1992),
@@ -221,60 +290,18 @@ Now analyze the given audio in the same format.""",
         seed: int,
         strip_thinking: bool,
     ) -> io.NodeOutput:
-        import comfy.model_management as model_management
-
-        patcher = moss_audio_model["patcher"]
-        processor = moss_audio_model["processor"]
-
-        model_management.load_models_gpu([patcher], force_full_load=True)
-        hf_model = patcher.model
-
-        waveform = audio["waveform"][0].mean(dim=0)  # downmix to mono: [samples]
-        sample_rate = audio["sample_rate"]
-        target_sr = processor.config.mel_sr
-        if sample_rate != target_sr:
-            waveform = torchaudio.functional.resample(waveform, sample_rate, target_sr)
-        raw_audio = waveform.cpu().numpy()
-
-        inputs = processor(text=prompt, audios=[raw_audio], return_tensors="pt")
-        inputs = inputs.to(hf_model.device)
-        if inputs.get("audio_data") is not None:
-            inputs["audio_data"] = inputs["audio_data"].to(hf_model.dtype)
-        inputs["audio_input_mask"] = inputs["input_ids"] == processor.audio_token_id
-
-        # transformers' GenerationMixin.generate() has no `generator` kwarg --
-        # sampling draws from torch's global RNG, so seeding it here is the
-        # only way to make do_sample=True runs reproducible.
-        torch.manual_seed(seed)
-
-        try:
-            with torch.no_grad():
-                generated_ids = hf_model.generate(
-                    **inputs,
-                    max_new_tokens=max_new_tokens,
-                    do_sample=temperature > 0.0,
-                    num_beams=1,
-                    temperature=max(temperature, 1e-5),
-                    top_p=top_p,
-                    top_k=top_k,
-                    repetition_penalty=repetition_penalty,
-                    use_cache=True,
-                )
-        finally:
-            # A steady-state MOSS-Audio load doesn't need to unload the model
-            # itself after every call -- load_models_gpu is idempotent, so
-            # the next call just reuses the resident weights. But transient
-            # CUDA state from this generate() call (KV cache, activations)
-            # should still be released here, including on the exception path
-            # (KeyboardInterrupt / ComfyUI's own interrupt exception).
-            gc.collect()
-            model_management.soft_empty_cache(force=True)
-
-        input_len = inputs["input_ids"].shape[1]
-        text = processor.decode(generated_ids[0, input_len:], skip_special_tokens=True)
-        if strip_thinking:
-            text = _THINK_BLOCK_RE.sub("", text).strip()
-
+        text = _run_moss_audio_generate(
+            moss_audio_model=moss_audio_model,
+            audio=audio,
+            prompt=prompt,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            repetition_penalty=repetition_penalty,
+            seed=seed,
+            strip_thinking=strip_thinking,
+        )
         return io.NodeOutput(text)
 
 
