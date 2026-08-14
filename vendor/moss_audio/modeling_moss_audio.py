@@ -16,6 +16,13 @@ from transformers.models.whisper.modeling_whisper import WhisperEncoderLayer
 # boo-moss-audio.vendor.moss_audio package rather than a top-level `src`.
 from .configuration_moss_audio import MossAudioEncoderConfig, MossAudioConfig
 
+# Flip this to True to print isfinite() checkpoints through the audio
+# encoder (conv stem, positions, per-layer, adapter). For chasing the
+# intermittent "audio_embeds contains non-finite values" error -- toggle
+# on, reproduce, and the first non-finite checkpoint printed pinpoints the
+# stage. Leave off by default; the per-layer check adds overhead.
+DEBUG_NAN_CHECKS = False
+
 
 class SinusoidsPositionEmbedding(nn.Module):
     def __init__(self, num_positions: int, embedding_dim: int):
@@ -132,18 +139,29 @@ class MossAudioEncoder(nn.Module):
         if x.size(1) > max_len:
             x = x[:, :max_len, :]
 
+        if DEBUG_NAN_CHECKS:
+            print(f"[DEBUG] post-conv-stem x isfinite={bool(torch.isfinite(x).all())} shape={tuple(x.shape)}")
+
         positions = self.embed_positions(x.shape[1], x.device)
         x = x + positions.to(x.dtype)
+        if DEBUG_NAN_CHECKS:
+            print(f"[DEBUG] post-positions x isfinite={bool(torch.isfinite(x).all())}")
 
         padding_mask = (
             torch.arange(x.size(1), device=x.device)[None, :] >= downsampled_lengths[:, None]
         )
         attention_mask = (1.0 - (~padding_mask).to(dtype=x.dtype)) * torch.finfo(x.dtype).min
         attention_mask = attention_mask.unsqueeze(1).unsqueeze(1)
+        if DEBUG_NAN_CHECKS:
+            print(
+                f"[DEBUG] downsampled_lengths={downsampled_lengths.tolist()} "
+                f"x.size(1)={x.size(1)} attention_mask isfinite={bool(torch.isfinite(attention_mask).all())}"
+            )
 
         deepstack_hidden_states: List[Optional[torch.Tensor]] = [None] * len(
             self.deepstack_encoder_layer_indexes
         )
+        first_bad_layer = None
         for layer_idx, layer in enumerate(self.layers):
             layer_out = layer(
                 x,
@@ -158,12 +176,20 @@ class MossAudioEncoder(nn.Module):
             # of the tensor on newer transformers instead of unpacking a
             # tuple, corrupting every layer after the first.
             x = layer_out[0] if isinstance(layer_out, tuple) else layer_out
+            if DEBUG_NAN_CHECKS and first_bad_layer is None and not torch.isfinite(x).all():
+                first_bad_layer = layer_idx
+                print(f"[DEBUG] FIRST non-finite x at layer_idx={layer_idx}")
             capture_idx = self._deepstack_capture_map.get(layer_idx)
             if capture_idx is not None:
                 deepstack_hidden_states[capture_idx] = x
 
+        if DEBUG_NAN_CHECKS:
+            print(f"[DEBUG] post-all-layers x isfinite={bool(torch.isfinite(x).all())} first_bad_layer={first_bad_layer}")
+
         x = self.layer_norm(x)
         x = self.out_proj(x)
+        if DEBUG_NAN_CHECKS:
+            print(f"[DEBUG] post-layer_norm-and-out_proj x isfinite={bool(torch.isfinite(x).all())}")
 
         ordered_deepstack_hidden_states = [
             h for h in deepstack_hidden_states if h is not None
@@ -476,8 +502,23 @@ class MossAudioModel(MossAudioPreTrainedModel, GenerationMixin):
             if audio_input_mask is None:
                 raise ValueError("audio_input_mask is required when audio_data is provided.")
 
-            audio_embeds, deepstack = self.get_audio_features(audio_data, audio_data_seqlens)
-            audio_embeds = self.audio_adapter(audio_embeds)
+            if DEBUG_NAN_CHECKS:
+                print(
+                    f"[DEBUG] audio_data isfinite={bool(torch.isfinite(audio_data).all())} "
+                    f"shape={tuple(audio_data.shape)} dtype={audio_data.dtype} "
+                    f"min={audio_data.min().item()} max={audio_data.max().item()}"
+                )
+            encoder_out, deepstack = self.get_audio_features(audio_data, audio_data_seqlens)
+            if DEBUG_NAN_CHECKS:
+                print(
+                    f"[DEBUG] encoder_out (pre-adapter) isfinite={bool(torch.isfinite(encoder_out).all())} "
+                    f"shape={tuple(encoder_out.shape)} dtype={encoder_out.dtype}"
+                )
+            audio_embeds = self.audio_adapter(encoder_out)
+            if DEBUG_NAN_CHECKS:
+                print(
+                    f"[DEBUG] audio_embeds (post-adapter) isfinite={bool(torch.isfinite(audio_embeds).all())}"
+                )
 
             if not torch.isfinite(audio_embeds).all():
                 raise RuntimeError(

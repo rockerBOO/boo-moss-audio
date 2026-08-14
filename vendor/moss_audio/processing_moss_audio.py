@@ -11,6 +11,12 @@ import torch
 import torchaudio
 from transformers import AutoTokenizer, BatchEncoding
 
+# Mirrors modeling_moss_audio.DEBUG_NAN_CHECKS -- flip both together when
+# chasing the intermittent "audio_embeds contains non-finite values" error,
+# to see whether corruption is already present in the extracted mel
+# features (this file) or only appears inside the encoder (that file).
+DEBUG_NAN_CHECKS = False
+
 
 @dataclass
 class MelConfig:
@@ -220,7 +226,22 @@ class MossAudioProcessor:
             feats = fe._np_extract_fbank_features(wav_np[None, ...], device="cpu")
             mel = torch.from_numpy(feats[0])
 
-        return mel.to(dtype=self.config.mel_dtype)
+        if DEBUG_NAN_CHECKS:
+            print(
+                f"[DEBUG] wav isfinite={bool(np.isfinite(wav_np).all())} "
+                f"len={wav_np.shape[-1]} min={wav_np.min()} max={wav_np.max()}"
+            )
+            print(
+                f"[DEBUG] mel (pre-cast) isfinite={bool(torch.isfinite(mel).all())} "
+                f"shape={tuple(mel.shape)} dtype={mel.dtype} "
+                f"min={mel.min().item()} max={mel.max().item()}"
+            )
+        mel_cast = mel.to(dtype=self.config.mel_dtype)
+        if DEBUG_NAN_CHECKS:
+            print(
+                f"[DEBUG] mel (post-cast to {self.config.mel_dtype}) isfinite={bool(torch.isfinite(mel_cast).all())}"
+            )
+        return mel_cast
 
     def _get_time_marker_token_ids(self, second: int) -> List[int]:
         return [self._digit_token_ids[digit] for digit in str(second)]
