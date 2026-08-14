@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import random
 import re
 from abc import ABC, abstractmethod
+from typing import Any
 
 from ..models import CaptionState
 
@@ -12,7 +15,7 @@ from ..models import CaptionState
 class BaseAgent(ABC):
     """All agents share the same LLM and state object."""
 
-    def __init__(self, llm_model: dict, state: CaptionState, *, style_keywords: str = "", lyrics: str = "") -> None:
+    def __init__(self, llm_model: Any, state: CaptionState, *, style_keywords: str = "", lyrics: str = "") -> None:
         self.llm_model = llm_model
         self.state = state
         self._style_keywords = style_keywords
@@ -31,21 +34,65 @@ class BaseAgent(ABC):
         """Parse the LLM response and update state."""
 
     def _call_llm(self, prompt: str) -> str:
-        """Call the external LLM model.
+        """Call the external LLM model and log the raw response for debugging.
 
-        Supports two interfaces:
-        1. Hugging Face style: llm_model has 'model', 'tokenizer', 'device' keys
-        2. Simple callable: llm_model['generate'](prompt) returns a string
+        Supports three interfaces:
+        1. ComfyUI CLIP-wrapped model (e.g. loaded via ComfyUI's own
+           CLIPLoader, per comfy_extras/nodes_textgen.py's TextGenerate node):
+           calls clip.tokenize()/generate()/decode() directly.
+        2. Hugging Face style: llm_model has 'model', 'tokenizer', 'device' keys
+        3. Simple callable: llm_model['generate'](prompt) returns a string
 
         Falls back to a simple split on '###' headers if no LLM is provided.
         """
+        response, generated = self._generate(prompt)
+        if generated:
+            logging.info(
+                "[music_caption:%s] LLM response:\n%s", type(self).__name__, response
+            )
+        return response
+
+    def _generate(self, prompt: str) -> tuple[str, bool]:
+        """Returns (response, generated) -- generated is False for the
+        no-LLM prompt-echo fallback, so _call_llm knows not to log it.
+        """
+        if self.llm_model is None:
+            return prompt, False
+
+        if (
+            hasattr(self.llm_model, "tokenize")
+            and hasattr(self.llm_model, "generate")
+            and hasattr(self.llm_model, "decode")
+        ):
+            # skip_template=False applies the model's chat-turn wrapping
+            # (e.g. Gemma's <start_of_turn>user...<end_of_turn>), which most
+            # tokenizers default to skipping (comfy/text_encoders/lt.py's
+            # Gemma3_Tokenizer defaults skip_template=True). Without it the
+            # model gets a raw, un-turned prompt with no stop cue and rambles
+            # until it hits max_length instead of finishing naturally.
+            tokens = self.llm_model.tokenize(prompt, skip_template=False)
+            generated_ids = self.llm_model.generate(
+                tokens,
+                do_sample=True,
+                max_length=1024,
+                temperature=0.7,
+                top_p=0.9,
+                top_k=50,
+                # CLIP.generate defaults seed=None, which crashes
+                # torch.Generator.manual_seed() whenever do_sample=True
+                # (comfy/text_encoders/llama.py's BaseGenerate.generate) --
+                # an explicit seed is required, not optional.
+                seed=random.randint(0, 0xFFFFFFFFFFFFFFFF),
+            )
+            return self.llm_model.decode(generated_ids), True
+
         if not self.llm_model or "generate" not in self.llm_model:
             # No LLM provided — return prompt as-is for testing
-            return prompt
+            return prompt, False
 
         gen = self.llm_model["generate"]
         if callable(gen):
-            return gen(prompt)
+            return gen(prompt), True
 
         # HF-style generation
         model = self.llm_model.get("model")
@@ -53,7 +100,7 @@ class BaseAgent(ABC):
         device = self.llm_model.get("device", "cpu")
 
         if model is None or tokenizer is None:
-            return prompt
+            return prompt, False
 
         import torch
 
@@ -62,7 +109,7 @@ class BaseAgent(ABC):
             outputs = model.generate(**inputs, max_new_tokens=2048, do_sample=True, temperature=0.7)
 
         input_len = inputs["input_ids"].shape[1]
-        return tokenizer.decode(outputs[0][input_len:], skip_special_tokens=True)
+        return tokenizer.decode(outputs[0][input_len:], skip_special_tokens=True), True
 
     def _extract_section(self, text: str, header: str) -> str:
         """Extract content under a ### header from LLM output."""

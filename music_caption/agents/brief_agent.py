@@ -14,9 +14,9 @@ class BriefAgent(BaseAgent):
     SYSTEM_PROMPT = (
         "You are a music brief extractor for MiniMax Music 3. "
         "Given style keywords and optional lyrics body text, extract a structured musical description. "
-        "Return each field as 'Field: value' on its own line. "
-        "Classify each field's confidence as EXPLICIT, TAGGED, INFERRED, or UNSPECIFIED. "
-        "Do not invent exact BPM, key, or vocal gender without evidence."
+        "Do not invent exact BPM, key, or vocal gender without evidence. "
+        "Do not use markdown formatting (no bullets, no bold/asterisks, no headers) "
+        "and do not add any prose before or after the list of lines."
     )
 
     FIELDS = [
@@ -60,12 +60,27 @@ class BriefAgent(BaseAgent):
             # Extract body text from lyrics (remove bracketed tags)
             lyrics_body = re.sub(r"\[.*?\]", "", self._lyrics).strip()
 
-        prompt = f"Style keywords: {self._style_keywords}\n"
+        prompt = self.SYSTEM_PROMPT + "\n\n"
+        prompt += f"Style keywords: {self._style_keywords}\n"
         if lyrics_body:
             prompt += f"Lyrics body: {lyrics_body}\n"
         if parts:
             prompt += f"Already identified: {'; '.join(parts)}\n"
-        prompt += "Extract all musical fields. Return each as 'Field: value, confidence'.\n"
+
+        field_list = "\n".join(f"- {name}" for name in self.FIELDS)
+        prompt += (
+            "\nRespond with exactly one line per field below, using the exact "
+            "field name shown (do not rename, merge, or split fields), in this "
+            f"exact format:\n{field_list}\n\n"
+            "Format: <field_name>: <value> (<CONFIDENCE>)\n"
+            "<CONFIDENCE> must be exactly one of: EXPLICIT, TAGGED, INFERRED, UNSPECIFIED.\n"
+            "For subgenres, core_instruments, and explicit_exclusions, use a "
+            "comma-separated list as <value>.\n"
+            "Example:\n"
+            "macro_genre: deep house (EXPLICIT)\n"
+            "vocal_gender: female (INFERRED)\n"
+            "core_instruments: analog synth, deep bass (TAGGED)\n"
+        )
         return self._sanitize(prompt)
 
     def parse_response(self, response: str) -> CaptionState:

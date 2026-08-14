@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import re
+from typing import Any
 
-from music_caption.models import CaptionState
-from music_caption.agents.brief_agent import BriefAgent
-from music_caption.agents.constraints_agent import ConstraintsAgent
-from music_caption.agents.router_agent import RouterAgent
-from music_caption.agents.selection_agent import SelectionAgent
-from music_caption.agents.template_reader import TemplateReader
-from music_caption.agents.timeline_agent import TimelineAgent
-from music_caption.agents.renderer_agent import RendererAgent
+from .models import CaptionState
+from .agents.brief_agent import BriefAgent
+from .agents.constraints_agent import ConstraintsAgent
+from .agents.router_agent import RouterAgent
+from .agents.selection_agent import SelectionAgent
+from .agents.template_reader import TemplateReader
+from .agents.timeline_agent import TimelineAgent
+from .agents.renderer_agent import RendererAgent
 
 
 def _extract_section_tags(lyrics: str) -> list[str]:
@@ -25,7 +26,7 @@ def _extract_section_tags(lyrics: str) -> list[str]:
 class CaptionRewriter:
     """Orchestrates the 8-stage caption rewriter pipeline."""
 
-    def __init__(self, llm_model: dict) -> None:
+    def __init__(self, llm_model: Any) -> None:
         self.llm_model = llm_model
         self.state = CaptionState()
 

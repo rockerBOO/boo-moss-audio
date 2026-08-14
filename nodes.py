@@ -1,8 +1,8 @@
-import asyncio
 import gc
 import logging
 import os
 import re
+from typing import Any
 
 import folder_paths
 import torch
@@ -221,7 +221,7 @@ Now analyze the given audio in the same format.""",
         seed: int,
         strip_thinking: bool,
     ) -> io.NodeOutput:
-        from comfy import model_management
+        import comfy.model_management as model_management
 
         patcher = moss_audio_model["patcher"]
         processor = moss_audio_model["processor"]
@@ -292,7 +292,7 @@ class BooMusicCaptionRewriter(io.ComfyNode):
                 "Metadata, Vocal Details, Arrangement)."
             ),
             inputs=[
-                io.Object.Input(
+                io.AnyType.Input(
                     "llm_model",
                     tooltip="External LLM model (e.g., Gemma).",
                 ),
@@ -317,16 +317,16 @@ class BooMusicCaptionRewriter(io.ComfyNode):
         )
 
     @classmethod
-    def execute(
+    async def execute(
         cls,
-        llm_model: dict,
+        llm_model: Any,
         style_keywords: str,
         lyrics: str,
     ) -> io.NodeOutput:
-        from music_caption import CaptionRewriter
+        from .music_caption import CaptionRewriter
 
         rewriter = CaptionRewriter(llm_model)
-        caption = asyncio.run(rewriter.rewrite(style_keywords, lyrics))
+        caption = await rewriter.rewrite(style_keywords, lyrics)
         return io.NodeOutput(caption)
 
 

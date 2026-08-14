@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from music_caption.agents.base import BaseAgent
+from .base import BaseAgent
 from ..models import CaptionState
 
 
@@ -19,7 +19,9 @@ class ConstraintsAgent(BaseAgent):
         "3) Strong implications from the user's description. "
         "4) Selected reference characteristics. "
         "5) Conservative musical defaults. "
-        "Return each resolved constraint as 'Field: value (rationale)'."
+        "Return each resolved constraint as a plain line: 'field: value (rationale)'. "
+        "Do not use markdown formatting (no bullets, no bold/asterisks, no headers) "
+        "and do not add any prose before or after the list of lines."
     )
 
     def build_prompt(self) -> str:
@@ -43,7 +45,8 @@ class ConstraintsAgent(BaseAgent):
             parts.append(f"Sections requested: {', '.join(self.state.explicit_sections)}")
 
         # Build prompt
-        prompt = f"Music Brief fields:\n"
+        prompt = self.SYSTEM_PROMPT + "\n\n"
+        prompt += "Music Brief fields:\n"
         for p in parts:
             prompt += f"- {p}\n"
 

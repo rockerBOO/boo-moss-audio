@@ -6,7 +6,7 @@ import os
 import re
 from pathlib import Path
 
-from music_caption.models import IndexCard
+from .models import IndexCard
 
 
 class GenreRouter:

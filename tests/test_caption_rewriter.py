@@ -250,8 +250,92 @@ class TestTemplateStore:
 
 
 # ---------------------------------------------------------------------------
-# Agent tests
+# BaseAgent._call_llm tests
 # ---------------------------------------------------------------------------
+
+class _EchoAgent(BaseAgent):
+    """Minimal concrete BaseAgent for exercising _call_llm directly."""
+
+    def build_prompt(self) -> str:
+        return ""
+
+    def parse_response(self, response: str) -> CaptionState:
+        return self.state
+
+    async def run(self) -> CaptionState:
+        return self.state
+
+
+class _FakeClip:
+    """Duck-types ComfyUI's comfy.sd.CLIP: tokenize()/generate()/decode().
+
+    Real CLIPLoader-wrapped models (e.g. Gemma, per comfy_extras/nodes_textgen.py)
+    expose exactly this interface; BaseAgent._call_llm must detect and use it
+    instead of treating llm_model as a dict.
+    """
+
+    def __init__(self, generated_text: str) -> None:
+        self.generated_text = generated_text
+        self.tokenize_calls: list[str] = []
+        self.tokenize_kwargs: list[dict] = []
+        self.generate_calls: list[dict] = []
+
+    def tokenize(self, text, **kwargs):
+        self.tokenize_calls.append(text)
+        self.tokenize_kwargs.append(kwargs)
+        return {"tokens": text}
+
+    def generate(self, tokens, **kwargs):
+        self.generate_calls.append(kwargs)
+        return ["fake-token-ids"]
+
+    def decode(self, token_ids, **kwargs):
+        assert token_ids == ["fake-token-ids"]
+        return self.generated_text
+
+
+class TestCallLLM:
+    def test_call_llm_uses_clip_like_object_when_present(self, caplog) -> None:
+        state = _make_state()
+        clip = _FakeClip("Macro genre: cinematic pop")
+        agent = _EchoAgent(clip, state)
+
+        with caplog.at_level("INFO"):
+            result = agent._call_llm("some prompt")
+
+        assert result == "Macro genre: cinematic pop"
+        assert clip.tokenize_calls == ["some prompt"]
+        assert len(clip.generate_calls) == 1
+        # CLIP.generate defaults seed=None, which crashes
+        # torch.Generator.manual_seed() whenever do_sample=True -- an
+        # explicit int seed must always be passed.
+        assert isinstance(clip.generate_calls[0]["seed"], int)
+        # skip_template=False must be passed explicitly: Gemma's tokenizer
+        # (comfy/text_encoders/lt.py's Gemma3_Tokenizer) defaults
+        # skip_template=True, which drops chat-turn wrapping entirely.
+        assert clip.tokenize_kwargs[0]["skip_template"] is False
+        # Debugging: each agent's raw LLM response should be logged.
+        assert "Macro genre: cinematic pop" in caplog.text
+        assert "_EchoAgent" in caplog.text
+
+    def test_call_llm_falls_back_to_prompt_when_llm_model_is_none(self, caplog) -> None:
+        state = _make_state()
+        agent = _EchoAgent(None, state)
+
+        with caplog.at_level("INFO"):
+            result = agent._call_llm("some prompt")
+
+        assert result == "some prompt"
+        # The no-LLM fallback isn't a real generation -- nothing to log.
+        assert caplog.text == ""
+
+    def test_call_llm_still_supports_dict_generate_callable(self) -> None:
+        state = _make_state()
+        mock_llm = _mock_llm(["dict-based response"])
+        agent = _EchoAgent(mock_llm, state)
+
+        assert agent._call_llm("some prompt") == "dict-based response"
+
 
 class TestBriefAgent:
     def test_build_prompt_with_keywords(self) -> None:
@@ -259,6 +343,25 @@ class TestBriefAgent:
         agent = BriefAgent({}, state, style_keywords="deep house, emotional, arpeggios")
         prompt = agent.build_prompt()
         assert "deep house" in prompt
+
+    def test_build_prompt_forces_exact_field_names_and_confidence_format(self) -> None:
+        """Regression: a real Gemma run once used its own field labels
+        ("Vocal Gender & Timbre") and bare-word confidence scores instead of
+        the exact snake_case FIELDS names + parenthesized enum that
+        parse_response requires, silently discarding every field. The prompt
+        must spell out both the exact field names and the exact format.
+        """
+        state = _make_state()
+        agent = BriefAgent({}, state, style_keywords="deep house")
+        prompt = agent.build_prompt()
+
+        for field in BriefAgent.FIELDS:
+            assert field in prompt
+        assert "EXPLICIT, TAGGED, INFERRED, UNSPECIFIED" in prompt
+        assert "do not use markdown formatting" in prompt.lower()
+        # SYSTEM_PROMPT previously wasn't referenced by build_prompt() at all
+        # (a dead constant) -- confirm it's actually sent to the model.
+        assert BriefAgent.SYSTEM_PROMPT in prompt
 
     def test_parse_response(self) -> None:
         state = _make_state()
@@ -298,6 +401,23 @@ class TestConstraintsAgent:
         prompt = agent.build_prompt()
         assert "deep house" in prompt
         assert "Exclusions" in prompt
+
+    def test_build_prompt_forbids_markdown_formatting(self) -> None:
+        """Regression: a real Gemma run once wrapped its response in markdown
+        bullets ("* **Genre: unspecified...**"), which parse_response's
+        line-anchored regex (requires a line to start with \\w) can never
+        match -- resolved_constraints came back empty despite real content.
+        The prompt must explicitly forbid markdown so lines stay parseable.
+        """
+        state = _make_state()
+        agent = ConstraintsAgent({}, state)
+        prompt = agent.build_prompt()
+
+        assert "do not use markdown formatting" in prompt.lower()
+        assert "no bullets" in prompt.lower()
+        # SYSTEM_PROMPT previously wasn't referenced by build_prompt() at all
+        # (a dead constant) -- confirm it's actually sent to the model.
+        assert ConstraintsAgent.SYSTEM_PROMPT in prompt
 
     def test_parse_response(self) -> None:
         state = _make_state()

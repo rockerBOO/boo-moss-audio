@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 from .base import BaseAgent
-from music_caption.models import AgentRole, CaptionState, SelectedReference
+from ..models import AgentRole, CaptionState, SelectedReference
 
 
 class SelectionAgent(BaseAgent):

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from music_caption.agents.base import BaseAgent
+from .base import BaseAgent
 from ..models import CaptionState
 
 
