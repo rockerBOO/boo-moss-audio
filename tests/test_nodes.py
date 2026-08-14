@@ -352,6 +352,29 @@ def test_minimax_prompt_generate_returns_empty_string_for_missing_label(monkeypa
     assert output.args[1] == "A mellow synth-pop track."
 
 
+def test_minimax_prompt_generate_returns_empty_strings_for_unlabeled_output(monkeypatch):
+    patcher = _FakePatcher(
+        SimpleNamespace(
+            device="cpu",
+            dtype=torch.float32,
+            generate=lambda **kwargs: torch.tensor([[1, 2, 3, 4, 5]]),
+        )
+    )
+    monkeypatch.setattr(comfy.model_management, "load_models_gpu", lambda models, **kwargs: None)
+
+    class _UnlabeledProcessor(_FakeProcessor):
+        def decode(self, ids, skip_special_tokens=True):
+            return "This is a mellow synth-pop track with a dreamy chorus."
+
+    output = BooMossAudioMiniMaxMusic3PromptGenerate.execute(
+        moss_audio_model={"patcher": patcher, "processor": _UnlabeledProcessor()},
+        **_generate_kwargs(),
+    )
+
+    assert output.args[0] == ""
+    assert output.args[1] == ""
+
+
 def test_minimax_prompt_generate_is_registered_in_extension_node_list():
     import asyncio
 

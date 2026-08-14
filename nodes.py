@@ -408,7 +408,7 @@ vocal, lead melody carried by [instrument]" if there's no singing)
 - Write the Global Emotional Progression as a story with tension, release, and
   climax, not a static list of adjectives.""",
                 ),
-                io.Int.Input("max_new_tokens", default=1024, min=1, max=8192),
+                io.Int.Input("max_new_tokens", default=4096, min=1, max=8192),
                 io.Float.Input("temperature", default=1.0, min=0.0, max=2.0, step=0.01),
                 io.Float.Input("top_p", default=1.0, min=0.0, max=1.0, step=0.01),
                 io.Int.Input("top_k", default=50, min=0, max=500),
