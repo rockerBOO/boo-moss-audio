@@ -58,3 +58,22 @@ def patch_quantized_linears(
         patched.append(name)
 
     return patched
+
+
+def build_quantized_model(config, quantized_state_dict, compute_dtype, device):
+    """Construct a MossAudioModel on the meta device (no real tensors allocated),
+    patch its comfy_quant-tagged Linear submodules per patch_quantized_linears, then
+    load the full state dict with assign=True -- binding each provided tensor directly
+    as that submodule's parameter/buffer rather than copying into a pre-allocated one
+    (meta-device parameters have no real storage to copy into)."""
+    from .modeling_moss_audio import MossAudioModel
+
+    with torch.device("meta"):
+        model = MossAudioModel(config)
+
+    patch_quantized_linears(model, quantized_state_dict, compute_dtype, device)
+
+    missing, unexpected = model.load_state_dict(
+        quantized_state_dict, strict=False, assign=True
+    )
+    return model, list(missing), list(unexpected)
