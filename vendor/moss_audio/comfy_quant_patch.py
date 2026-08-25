@@ -11,7 +11,6 @@ the quant-tooling repo for the spike that established this.
 
 import torch
 import torch.nn as nn
-from accelerate import init_empty_weights
 
 import comfy.ops as comfy_ops
 
@@ -82,6 +81,14 @@ def build_quantized_model(config, quantized_state_dict, compute_dtype, device):
     parameters go to meta.
     """
     from .modeling_moss_audio import MossAudioModel
+
+    try:
+        from accelerate import init_empty_weights
+    except ImportError as e:
+        raise ImportError(
+            "accelerate is required for loading quantized MOSS-Audio checkpoints; "
+            "install it with `pip install accelerate`."
+        ) from e
 
     with init_empty_weights():
         model = MossAudioModel(config)

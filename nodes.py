@@ -224,16 +224,45 @@ class BooMossAudioLoader(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, model: str, enable_time_marker: bool, quantized: bool) -> io.NodeOutput:
+    def execute(
+        cls, model: str, enable_time_marker: bool, quantized: bool = False
+    ) -> io.NodeOutput:
         import comfy.model_patcher
         from comfy import model_management
         from huggingface_hub import snapshot_download
+
+        # Validate the quantized request *before* any download happens -- these checks
+        # are cheap and local, whereas the downloads below can be multi-GB. Doing this
+        # first means an unpublished-model or non-Blackwell-hardware request fails fast
+        # without ever touching the network or disk.
+        if quantized:
+            if model not in MOSS_AUDIO_QUANTIZED_REPOS:
+                raise ValueError(
+                    f"No quantized checkpoint published for {model!r}. "
+                    f"Available: {list(MOSS_AUDIO_QUANTIZED_REPOS)}"
+                )
+            load_device_check = model_management.get_torch_device()
+            if not model_management.supports_nvfp4_compute(load_device_check):
+                raise RuntimeError(
+                    "The quantized MOSS-Audio checkpoint requires a Blackwell GPU "
+                    "(SM >= 10.0) for NVFP4 compute; this device does not support it."
+                )
 
         repo_id = MOSS_AUDIO_REPOS[model]
         local_dir = _local_model_dir(repo_id)
         if not os.path.isdir(local_dir) or not os.listdir(local_dir):
             logging.info("BooMossAudioLoader: downloading %s to %s", repo_id, local_dir)
-            snapshot_download(repo_id=repo_id, local_dir=local_dir)
+            if quantized:
+                # On the quantized path, this repo is only used to source config.json
+                # and the tokenizer/processor files below -- the bf16 safetensors
+                # (~10-16GB) are never opened, so don't download them.
+                snapshot_download(
+                    repo_id=repo_id,
+                    local_dir=local_dir,
+                    allow_patterns=["*.json", "*.jinja", "*.txt", "merges.txt", "vocab.json"],
+                )
+            else:
+                snapshot_download(repo_id=repo_id, local_dir=local_dir)
 
         load_device = model_management.get_torch_device()
         offload_device = model_management.unet_offload_device()
@@ -250,17 +279,8 @@ class BooMossAudioLoader(io.ComfyNode):
             dtype = torch.bfloat16
 
         if quantized:
-            if model not in MOSS_AUDIO_QUANTIZED_REPOS:
-                raise ValueError(
-                    f"No quantized checkpoint published for {model!r}. "
-                    f"Available: {list(MOSS_AUDIO_QUANTIZED_REPOS)}"
-                )
-            if not model_management.supports_nvfp4_compute(load_device):
-                raise RuntimeError(
-                    "The quantized MOSS-Audio checkpoint requires a Blackwell GPU "
-                    "(SM >= 10.0) for NVFP4 compute; this device does not support it."
-                )
-
+            # Unpublished-model/non-Blackwell validation already happened at the top
+            # of execute(), before any download.
             quant_repo_id = MOSS_AUDIO_QUANTIZED_REPOS[model]
             quant_local_dir = _local_model_dir(quant_repo_id)
             if not os.path.isdir(quant_local_dir) or not os.listdir(quant_local_dir):

@@ -1,11 +1,10 @@
+import pytest
 import torch
 from transformers import Qwen3Config
 
 from vendor.moss_audio.comfy_quant_patch import build_quantized_model
 from vendor.moss_audio.configuration_moss_audio import MossAudioConfig
 from vendor.moss_audio.modeling_moss_audio import MossAudioModel
-
-import pytest
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA GPU")
 
@@ -31,7 +30,6 @@ def _quantize_all_self_attn_projs(config, reference_state_dict):
     (random-initialized) weight *values* rather than zeros, so generate() exercises
     real (if untrained) numbers rather than degenerate all-zero activations."""
     sd = dict(reference_state_dict)
-    hidden = config.language_config.hidden_size
     for layer_idx in range(config.language_config.num_hidden_layers):
         for proj in ("q_proj", "k_proj", "v_proj", "o_proj"):
             key = f"language_model.layers.{layer_idx}.self_attn.{proj}"

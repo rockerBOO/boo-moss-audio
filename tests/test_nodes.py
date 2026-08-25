@@ -427,7 +427,8 @@ def test_minimax_prompt_generate_is_registered_in_extension_node_list():
     assert BooMossAudioMiniMaxMusic3PromptGenerate in node_list
 
 
-def test_quantized_toggle_rejects_unpublished_model(monkeypatch):
+def test_quantized_toggle_rejects_unpublished_model(monkeypatch, tmp_path):
+    monkeypatch.setattr(nodes, "_local_model_dir", lambda repo_id: str(tmp_path))
     monkeypatch.setattr(
         "comfy.model_management.supports_nvfp4_compute", lambda device=None: True
     )
@@ -442,7 +443,8 @@ def test_quantized_toggle_rejects_unpublished_model(monkeypatch):
         assert "No quantized checkpoint published" in str(e)
 
 
-def test_quantized_toggle_rejects_non_blackwell_hardware(monkeypatch):
+def test_quantized_toggle_rejects_non_blackwell_hardware(monkeypatch, tmp_path):
+    monkeypatch.setattr(nodes, "_local_model_dir", lambda repo_id: str(tmp_path))
     monkeypatch.setattr(
         "comfy.model_management.supports_nvfp4_compute", lambda device=None: False
     )

@@ -11,6 +11,10 @@
 # this package actually runs (vendor/moss_audio/) were verified by a real
 # load+generate run to need nothing beyond torch/torchaudio/transformers/numpy.
 # accelerate is used by vendor/moss_audio/comfy_quant_patch.py
-# (init_empty_weights, include_buffers=False) -- confirmed present in
-# ComfyUI's own venv already (it's a transformers-ecosystem dependency).
+# (init_empty_weights, include_buffers=False). It is NOT a hard dependency of
+# transformers (only an optional extra there) -- it's provided by ComfyUI's
+# own pyproject.toml. That means it's guaranteed present for installs that
+# follow ComfyUI's pyproject.toml, but may be absent from some ComfyUI
+# installs/portable builds that only ever run ComfyUI's requirements.txt.
+# comfy_quant_patch.py raises a clear ImportError if it's missing.
 huggingface_hub>=0.20.0
