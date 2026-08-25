@@ -118,7 +118,9 @@ def test_loader_wraps_model_in_model_patcher_with_pinned_dtype(monkeypatch, tmp_
         MossAudioProcessor, "from_pretrained", staticmethod(fake_processor_from_pretrained)
     )
 
-    output = BooMossAudioLoader.execute(model="MOSS-Audio-4B-Instruct", enable_time_marker=True)
+    output = BooMossAudioLoader.execute(
+        model="MOSS-Audio-4B-Instruct", enable_time_marker=True, quantized=False
+    )
     result = output.args[0]
 
     assert captured["local_dir"] == str(tmp_path)
@@ -423,3 +425,33 @@ def test_minimax_prompt_generate_is_registered_in_extension_node_list():
     extension = nodes.BooMossAudioExtension()
     node_list = asyncio.run(extension.get_node_list())
     assert BooMossAudioMiniMaxMusic3PromptGenerate in node_list
+
+
+def test_quantized_toggle_rejects_unpublished_model(monkeypatch):
+    monkeypatch.setattr(
+        "comfy.model_management.supports_nvfp4_compute", lambda device=None: True
+    )
+    try:
+        BooMossAudioLoader.execute(
+            model="MOSS-Audio-4B-Instruct",  # not in MOSS_AUDIO_QUANTIZED_REPOS
+            enable_time_marker=True,
+            quantized=True,
+        )
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "No quantized checkpoint published" in str(e)
+
+
+def test_quantized_toggle_rejects_non_blackwell_hardware(monkeypatch):
+    monkeypatch.setattr(
+        "comfy.model_management.supports_nvfp4_compute", lambda device=None: False
+    )
+    try:
+        BooMossAudioLoader.execute(
+            model="MOSS-Audio-8B-Thinking",
+            enable_time_marker=True,
+            quantized=True,
+        )
+        assert False, "expected RuntimeError"
+    except RuntimeError as e:
+        assert "Blackwell" in str(e)

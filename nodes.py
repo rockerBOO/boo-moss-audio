@@ -40,6 +40,13 @@ MOSS_AUDIO_REPOS = {
     "MOSS-Audio-8B-Thinking": "OpenMOSS-Team/MOSS-Audio-8B-Thinking",
 }
 
+# Only the 8B-Thinking variant has a published NVFP4+ConvRot-INT8 quantization as of
+# this writing -- see quant-tooling's docs/superpowers/plans/
+# 2026-08-24-moss-audio-8b-thinking-quant-recipe.md for how it was produced.
+MOSS_AUDIO_QUANTIZED_REPOS = {
+    "MOSS-Audio-8B-Thinking": "rockerBOO/moss-audio-8b-thinking-nvfp4-convrot-int8",
+}
+
 # MOSS-Audio's Thinking variants wrap chain-of-thought reasoning in
 # <think>...</think> before the actual answer. Downstream prompt-enhancement
 # consumers want the answer only, so BooMossAudioGenerate strips it by default.
@@ -202,13 +209,22 @@ class BooMossAudioLoader(io.ComfyNode):
                     default=True,
                     tooltip="Insert explicit time tokens so the model can reason about when things happen.",
                 ),
+                io.Boolean.Input(
+                    "quantized",
+                    default=False,
+                    tooltip=(
+                        "Load the NVFP4+ConvRot-INT8 quantization instead of full precision. "
+                        "Requires a Blackwell GPU (SM >= 10.0) and is only available for models "
+                        "listed in MOSS_AUDIO_QUANTIZED_REPOS."
+                    ),
+                ),
             ],
             outputs=[BooMossAudioModel.Output(display_name="moss_audio_model")],
             search_aliases=["moss", "openmoss", "audio understanding", "asr", "captioning"],
         )
 
     @classmethod
-    def execute(cls, model: str, enable_time_marker: bool) -> io.NodeOutput:
+    def execute(cls, model: str, enable_time_marker: bool, quantized: bool) -> io.NodeOutput:
         import comfy.model_patcher
         from comfy import model_management
         from huggingface_hub import snapshot_download
@@ -233,7 +249,52 @@ class BooMossAudioLoader(io.ComfyNode):
             # supports it.
             dtype = torch.bfloat16
 
-        hf_model = MossAudioModel.from_pretrained(local_dir, dtype=dtype)
+        if quantized:
+            if model not in MOSS_AUDIO_QUANTIZED_REPOS:
+                raise ValueError(
+                    f"No quantized checkpoint published for {model!r}. "
+                    f"Available: {list(MOSS_AUDIO_QUANTIZED_REPOS)}"
+                )
+            if not model_management.supports_nvfp4_compute(load_device):
+                raise RuntimeError(
+                    "The quantized MOSS-Audio checkpoint requires a Blackwell GPU "
+                    "(SM >= 10.0) for NVFP4 compute; this device does not support it."
+                )
+
+            quant_repo_id = MOSS_AUDIO_QUANTIZED_REPOS[model]
+            quant_local_dir = _local_model_dir(quant_repo_id)
+            if not os.path.isdir(quant_local_dir) or not os.listdir(quant_local_dir):
+                logging.info(
+                    "BooMossAudioLoader: downloading %s to %s", quant_repo_id, quant_local_dir
+                )
+                snapshot_download(repo_id=quant_repo_id, local_dir=quant_local_dir)
+
+            from safetensors.torch import load_file
+
+            try:
+                # See the top-of-file comment on MossAudioModel/MossAudioProcessor for why
+                # this needs both a relative and an absolute fallback import.
+                from .vendor.moss_audio.comfy_quant_patch import build_quantized_model
+                from .vendor.moss_audio.configuration_moss_audio import MossAudioConfig
+            except ImportError:
+                from vendor.moss_audio.comfy_quant_patch import build_quantized_model
+                from vendor.moss_audio.configuration_moss_audio import MossAudioConfig
+
+            config = MossAudioConfig.from_pretrained(local_dir)  # config still comes from the bf16 repo
+            weights_path = os.path.join(
+                quant_local_dir, "moss-audio-8b-thinking_nvfp4_convrot_int8.safetensors"
+            )
+            quantized_sd = load_file(weights_path)
+            hf_model, missing, unexpected = build_quantized_model(
+                config, quantized_sd, compute_dtype=dtype, device=load_device
+            )
+            if missing or unexpected:
+                raise RuntimeError(
+                    f"Quantized checkpoint load mismatch -- missing: {missing}, "
+                    f"unexpected: {unexpected}"
+                )
+        else:
+            hf_model = MossAudioModel.from_pretrained(local_dir, dtype=dtype)
         hf_model.eval()
         hf_model = _make_device_settable(hf_model)
         patcher = comfy.model_patcher.ModelPatcher(
