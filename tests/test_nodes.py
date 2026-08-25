@@ -101,6 +101,21 @@ class _FakeHFModel(torch.nn.Module):
 def test_loader_wraps_model_in_model_patcher_with_pinned_dtype(monkeypatch, tmp_path):
     monkeypatch.setattr(nodes, "_local_model_dir", lambda repo_id: str(tmp_path))
     (tmp_path / "config.json").write_text("{}")
+    # Stub safetensors file so the content-aware reuse guard treats this dir as
+    # already downloaded and skips snapshot_download (see download_calls assertion
+    # below) -- without this, this test previously performed a real ~9.8GB network
+    # download of the model on every run.
+    (tmp_path / "model.safetensors").write_text("")
+
+    download_calls = []
+
+    def fake_snapshot_download(**kwargs):
+        download_calls.append(kwargs)
+        return str(tmp_path)
+
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", fake_snapshot_download)
 
     fake_model = _FakeHFModel()
     captured = {}
@@ -138,6 +153,10 @@ def test_loader_wraps_model_in_model_patcher_with_pinned_dtype(monkeypatch, tmp_
     assert patcher.model is fake_model
     assert patcher.load_device == comfy.model_management.get_torch_device()
     assert patcher.offload_device == comfy.model_management.unet_offload_device()
+
+    assert download_calls == [], (
+        "local_dir already has a *.safetensors file -- snapshot_download must not be called"
+    )
 
 
 def test_loader_redownloads_when_local_dir_has_only_config_no_safetensors(monkeypatch, tmp_path):
