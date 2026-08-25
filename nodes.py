@@ -1,4 +1,5 @@
 import gc
+import glob
 import logging
 import os
 import re
@@ -235,14 +236,14 @@ class BooMossAudioLoader(io.ComfyNode):
         # are cheap and local, whereas the downloads below can be multi-GB. Doing this
         # first means an unpublished-model or non-Blackwell-hardware request fails fast
         # without ever touching the network or disk.
+        load_device = model_management.get_torch_device()
         if quantized:
             if model not in MOSS_AUDIO_QUANTIZED_REPOS:
                 raise ValueError(
                     f"No quantized checkpoint published for {model!r}. "
                     f"Available: {list(MOSS_AUDIO_QUANTIZED_REPOS)}"
                 )
-            load_device_check = model_management.get_torch_device()
-            if not model_management.supports_nvfp4_compute(load_device_check):
+            if not model_management.supports_nvfp4_compute(load_device):
                 raise RuntimeError(
                     "The quantized MOSS-Audio checkpoint requires a Blackwell GPU "
                     "(SM >= 10.0) for NVFP4 compute; this device does not support it."
@@ -250,21 +251,41 @@ class BooMossAudioLoader(io.ComfyNode):
 
         repo_id = MOSS_AUDIO_REPOS[model]
         local_dir = _local_model_dir(repo_id)
-        if not os.path.isdir(local_dir) or not os.listdir(local_dir):
+        if quantized:
+            # On the quantized path, this repo is only used to source config.json
+            # and the tokenizer/processor files below -- the bf16 safetensors
+            # (~10-16GB) are never opened, so don't download them. If the
+            # non-quantized path already pulled a full copy of this repo (it will
+            # have config.json too), this check is already satisfied and we skip
+            # a redundant restricted download.
+            needs_download = not os.path.isdir(local_dir) or not os.path.isfile(
+                os.path.join(local_dir, "config.json")
+            )
+        else:
+            # Content-aware, not just "directory is non-empty": a prior quantized-path
+            # run may have already populated local_dir with only the restricted
+            # config/tokenizer files (no *.safetensors), which from_pretrained() below
+            # needs. Require at least one safetensors shard before treating this as
+            # already downloaded, otherwise we'd silently skip the download and hit a
+            # confusing bare FileNotFoundError deep inside from_pretrained().
+            needs_download = not os.path.isdir(local_dir) or not glob.glob(
+                os.path.join(local_dir, "*.safetensors")
+            )
+        if needs_download:
             logging.info("BooMossAudioLoader: downloading %s to %s", repo_id, local_dir)
             if quantized:
-                # On the quantized path, this repo is only used to source config.json
-                # and the tokenizer/processor files below -- the bf16 safetensors
-                # (~10-16GB) are never opened, so don't download them.
                 snapshot_download(
                     repo_id=repo_id,
                     local_dir=local_dir,
                     allow_patterns=["*.json", "*.jinja", "*.txt", "merges.txt", "vocab.json"],
                 )
             else:
+                # snapshot_download is safe to call against a local_dir that already
+                # has some files (e.g. only the quantized path's config/tokenizer
+                # subset) -- it fills in whatever's missing rather than re-fetching
+                # or clobbering files that already match the remote.
                 snapshot_download(repo_id=repo_id, local_dir=local_dir)
 
-        load_device = model_management.get_torch_device()
         offload_device = model_management.unet_offload_device()
         dtype = model_management.text_encoder_dtype(load_device)
         if dtype not in (torch.float16, torch.bfloat16, torch.float32):

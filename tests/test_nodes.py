@@ -140,6 +140,50 @@ def test_loader_wraps_model_in_model_patcher_with_pinned_dtype(monkeypatch, tmp_
     assert patcher.offload_device == comfy.model_management.unet_offload_device()
 
 
+def test_loader_redownloads_when_local_dir_has_only_config_no_safetensors(monkeypatch, tmp_path):
+    # Regression test: a prior quantized-path run may have populated local_dir with
+    # only the restricted config/tokenizer subset (allow_patterns=["*.json", ...]),
+    # no *.safetensors shards. The non-quantized path's reuse guard must not treat
+    # that as "already downloaded" -- it must detect the missing safetensors and
+    # trigger a real snapshot_download, not silently skip straight to
+    # MossAudioModel.from_pretrained() and blow up with a bare FileNotFoundError.
+    monkeypatch.setattr(nodes, "_local_model_dir", lambda repo_id: str(tmp_path))
+    (tmp_path / "config.json").write_text("{}")
+    (tmp_path / "tokenizer.json").write_text("{}")
+
+    download_calls = []
+
+    def fake_snapshot_download(**kwargs):
+        download_calls.append(kwargs)
+        (tmp_path / "model-00001-of-00001.safetensors").write_text("fake weights")
+        return str(tmp_path)
+
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", fake_snapshot_download)
+
+    fake_model = _FakeHFModel()
+    monkeypatch.setattr(
+        MossAudioModel,
+        "from_pretrained",
+        staticmethod(lambda local_dir, dtype: fake_model),
+    )
+    monkeypatch.setattr(
+        MossAudioProcessor,
+        "from_pretrained",
+        staticmethod(lambda local_dir, enable_time_marker: object()),
+    )
+
+    BooMossAudioLoader.execute(
+        model="MOSS-Audio-4B-Instruct", enable_time_marker=True, quantized=False
+    )
+
+    assert len(download_calls) == 1, "expected the incomplete local_dir to trigger a re-download"
+    assert "allow_patterns" not in download_calls[0], (
+        "the non-quantized path's re-download must be the full, unrestricted snapshot_download"
+    )
+
+
 class _FakePatcher:
     def __init__(self, model):
         self.model = model
@@ -429,6 +473,7 @@ def test_minimax_prompt_generate_is_registered_in_extension_node_list():
 
 def test_quantized_toggle_rejects_unpublished_model(monkeypatch, tmp_path):
     monkeypatch.setattr(nodes, "_local_model_dir", lambda repo_id: str(tmp_path))
+    (tmp_path / "config.json").write_text("{}")
     monkeypatch.setattr(
         "comfy.model_management.supports_nvfp4_compute", lambda device=None: True
     )
@@ -445,6 +490,7 @@ def test_quantized_toggle_rejects_unpublished_model(monkeypatch, tmp_path):
 
 def test_quantized_toggle_rejects_non_blackwell_hardware(monkeypatch, tmp_path):
     monkeypatch.setattr(nodes, "_local_model_dir", lambda repo_id: str(tmp_path))
+    (tmp_path / "config.json").write_text("{}")
     monkeypatch.setattr(
         "comfy.model_management.supports_nvfp4_compute", lambda device=None: False
     )
