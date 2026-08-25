@@ -21,7 +21,7 @@ def test_moss_audio_survives_load_offload_reload_generate_cycle():
     load_device = model_management.get_torch_device()
 
     loader_output = BooMossAudioLoader.execute(
-        model="MOSS-Audio-4B-Instruct", enable_time_marker=True
+        model="MOSS-Audio-4B-Instruct", enable_time_marker=True, quantized=False
     )
     moss_audio_model = loader_output.args[0]
     patcher = moss_audio_model["patcher"]
