@@ -11,6 +11,7 @@ the quant-tooling repo for the spike that established this.
 
 import torch
 import torch.nn as nn
+from accelerate import init_empty_weights
 
 import comfy.ops as comfy_ops
 
@@ -61,14 +62,28 @@ def patch_quantized_linears(
 
 
 def build_quantized_model(config, quantized_state_dict, compute_dtype, device):
-    """Construct a MossAudioModel on the meta device (no real tensors allocated),
-    patch its comfy_quant-tagged Linear submodules per patch_quantized_linears, then
-    load the full state dict with assign=True -- binding each provided tensor directly
-    as that submodule's parameter/buffer rather than copying into a pre-allocated one
-    (meta-device parameters have no real storage to copy into)."""
+    """Construct a MossAudioModel with all *parameters* on the meta device (no real
+    weight tensors allocated), patch its comfy_quant-tagged Linear submodules per
+    patch_quantized_linears, then load the full state dict with assign=True -- binding
+    each provided tensor directly as that submodule's parameter/buffer rather than
+    copying into a pre-allocated one (meta-device parameters have no real storage to
+    copy into).
+
+    Uses accelerate.init_empty_weights() rather than a bare `with torch.device("meta")`
+    block: the latter also meta-izes *buffers*, including non-persistent ones (e.g.
+    rotary-embedding inv_freq, the audio encoder's inv_timescales) that are deliberately
+    excluded from state_dict()/checkpoints because they're deterministic functions of
+    config, not learned data. Those buffers would then have no checkpoint key to ever
+    load real data from, leaving them permanently stuck on the meta device -- surfaced
+    by a `NotImplementedError: Cannot copy out of meta tensor; no data!` the first time
+    anything (e.g. a later `.to(device)`, or a forward pass touching that buffer) tried
+    to materialize them. init_empty_weights() defaults to include_buffers=False, so
+    buffers are constructed normally (real, on the current default device) while only
+    parameters go to meta.
+    """
     from .modeling_moss_audio import MossAudioModel
 
-    with torch.device("meta"):
+    with init_empty_weights():
         model = MossAudioModel(config)
 
     patch_quantized_linears(model, quantized_state_dict, compute_dtype, device)
