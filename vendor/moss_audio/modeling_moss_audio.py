@@ -520,6 +520,7 @@ class MossAudioModel(MossAudioPreTrainedModel, GenerationMixin):
         audio_data_seqlens: Optional[torch.Tensor] = None,
         audio_input_mask: Optional[torch.Tensor] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        logits_to_keep: Union[int, torch.Tensor] = 0,
         **kwargs: Any,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -609,7 +610,16 @@ class MossAudioModel(MossAudioPreTrainedModel, GenerationMixin):
                 h.remove()
 
         hidden_states = outputs[0]
-        logits = self.lm_head(hidden_states)
+        # transformers' GenerationMixin.generate() only detects support for this
+        # optimization via inspect.signature() on an explicit `logits_to_keep`
+        # parameter (generation/utils.py's _supports_logits_to_keep()), so it must
+        # be declared above rather than left to **kwargs. Without slicing here,
+        # every prefill call materializes lm_head logits for the whole input
+        # sequence -- including every audio token -- instead of just the last
+        # position needed to sample the next token, which is what was causing
+        # CUDA OOMs on long audio inputs.
+        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+        logits = self.lm_head(hidden_states[:, slice_indices, :])
 
         if not torch.isfinite(logits).all():
             raise RuntimeError(
