@@ -145,12 +145,19 @@ class MossAudioEncoder(nn.Module):
             self.deepstack_encoder_layer_indexes
         )
         for layer_idx, layer in enumerate(self.layers):
-            x = layer(
+            layer_out = layer(
                 x,
                 attention_mask,
                 layer_head_mask=None,
                 output_attentions=False,
-            )[0]
+            )
+            # transformers >=4.51 WhisperEncoderLayer.forward returns the
+            # hidden-state tensor directly; older versions returned
+            # (hidden_states, attn_weights). Indexing [0] unconditionally
+            # (upstream's assumption) silently slices the batch dimension
+            # of the tensor on newer transformers instead of unpacking a
+            # tuple, corrupting every layer after the first.
+            x = layer_out[0] if isinstance(layer_out, tuple) else layer_out
             capture_idx = self._deepstack_capture_map.get(layer_idx)
             if capture_idx is not None:
                 deepstack_hidden_states[capture_idx] = x
@@ -472,6 +479,13 @@ class MossAudioModel(MossAudioPreTrainedModel, GenerationMixin):
             audio_embeds, deepstack = self.get_audio_features(audio_data, audio_data_seqlens)
             audio_embeds = self.audio_adapter(audio_embeds)
 
+            if not torch.isfinite(audio_embeds).all():
+                raise RuntimeError(
+                    "audio_embeds contains non-finite values (nan/inf) after the audio "
+                    "encoder + adapter -- the audio encoder produced a bad embedding "
+                    "before generation even started, not a decoding-time instability."
+                )
+
             audio_token_count = int(audio_input_mask.to(torch.int32).sum().item())
             if audio_token_count != int(audio_embeds.shape[1]):
                 raise ValueError(
@@ -522,6 +536,18 @@ class MossAudioModel(MossAudioPreTrainedModel, GenerationMixin):
         hidden_states = outputs[0]
         logits = self.lm_head(hidden_states)
 
+        if not torch.isfinite(logits).all():
+            raise RuntimeError(
+                f"logits contain non-finite values (nan/inf) after lm_head, "
+                f"logits.shape={tuple(logits.shape)}, "
+                f"had_audio_this_call={audio_data is not None}, "
+                f"hidden_states.isfinite={bool(torch.isfinite(hidden_states).all())}. "
+                "This is raised here to fail with a Python traceback before "
+                "generate()'s multinomial sampling hits CUDA's device-side "
+                "assert, which aborts the whole process instead of raising "
+                "a catchable exception."
+            )
+
         loss = None
         if labels is not None:
             shift_logits = logits[..., :-1, :].contiguous()
@@ -550,38 +576,44 @@ class MossAudioModel(MossAudioPreTrainedModel, GenerationMixin):
         past_key_values=None,
         attention_mask=None,
         inputs_embeds=None,
-        cache_position=None,
+        is_first_iteration: bool = False,
         **kwargs,
     ):
-        position_ids = kwargs.get("position_ids", None)
-        if cache_position is not None and cache_position[0] > 0:
-            input_ids = input_ids[:, -1:]
-            if position_ids is not None:
-                position_ids = position_ids[:, -1:]
-            audio_data = None
-            audio_input_mask = None
-            audio_data_seqlens = None
-        else:
-            audio_data = kwargs.get("audio_data", None)
-            audio_input_mask = kwargs.get("audio_input_mask", None)
-            audio_data_seqlens = kwargs.get("audio_data_seqlens", None)
+        # transformers' GenerationMixin.prepare_inputs_for_generation (base
+        # implementation) changed in a way upstream MOSS-Audio's override
+        # doesn't account for: input-slicing is now driven by the
+        # `next_sequence_length` kwarg passed in by `generate()`, and
+        # `cache_position` is no longer threaded through `model_kwargs`
+        # between steps (the old `cache_position[0] > 0` check upstream
+        # used to detect decode-vs-prefill therefore always saw a stale/
+        # absent cache_position and never sliced `input_ids` down to the
+        # newest token, growing `input_ids` one token ahead of the
+        # prefill-length `audio_input_mask` on every decode step). Delegate
+        # the standard slicing/mask/position-id bookkeeping to the base
+        # implementation, using its `is_first_iteration` flag -- which
+        # `generate()` does pass correctly -- to gate the audio-specific
+        # inputs instead.
+        audio_data = kwargs.pop("audio_data", None)
+        audio_input_mask = kwargs.pop("audio_input_mask", None)
+        audio_data_seqlens = kwargs.pop("audio_data_seqlens", None)
 
-        if inputs_embeds is not None and past_key_values is None:
-            model_inputs = {"inputs_embeds": inputs_embeds}
-        else:
-            model_inputs = {"input_ids": input_ids}
-
-        model_inputs.update(
-            {
-                "past_key_values": past_key_values,
-                "use_cache": kwargs.get("use_cache"),
-                "attention_mask": attention_mask,
-                "position_ids": position_ids,
-                "audio_data": audio_data,
-                "audio_input_mask": audio_input_mask,
-                "audio_data_seqlens": audio_data_seqlens,
-            }
+        model_inputs = super().prepare_inputs_for_generation(
+            input_ids,
+            past_key_values=past_key_values,
+            attention_mask=attention_mask,
+            inputs_embeds=inputs_embeds,
+            is_first_iteration=is_first_iteration,
+            **kwargs,
         )
+
+        if is_first_iteration:
+            model_inputs["audio_data"] = audio_data
+            model_inputs["audio_input_mask"] = audio_input_mask
+            model_inputs["audio_data_seqlens"] = audio_data_seqlens
+        else:
+            model_inputs["audio_data"] = None
+            model_inputs["audio_input_mask"] = None
+            model_inputs["audio_data_seqlens"] = None
 
         return model_inputs
 

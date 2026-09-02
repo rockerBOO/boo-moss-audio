@@ -7,9 +7,13 @@ license = "GPL-3.0-or-later"
 requires-python = ">=3.11"
 dependencies = ["huggingface_hub>=0.20.0"]
 
+[dependency-groups]
+test = ["pytest>=8.0.0", "pytest-asyncio>=0.24.0"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--import-mode=importlib --confcutdir=tests -p no:torchtyping"
+asyncio_mode = "auto"
 
 [tool.ruff]
 line-length = 100

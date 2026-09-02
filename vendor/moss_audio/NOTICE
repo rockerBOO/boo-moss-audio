@@ -49,6 +49,32 @@ noted here:
   ...` to `from .configuration_moss_audio import ...` (a relative import),
   so the module resolves inside this vendored package
   (boo-moss-audio/vendor/moss_audio/) instead of requiring a top-level `src`
-  package on sys.path. No other changes.
+  package on sys.path.
+
+- modeling_moss_audio.py: in `MossAudioEncoder._encode_chunk_batch`,
+  `x = layer(...)[0]` was changed to check whether the WhisperEncoderLayer
+  call returned a tuple before indexing. Upstream assumes
+  `WhisperEncoderLayer.forward` returns `(hidden_states, attn_weights)`,
+  which was true on the transformers version upstream was written against.
+  transformers >=4.51's `WhisperEncoderLayer.forward` returns the
+  hidden-state tensor directly (`-> torch.Tensor`), so unconditional `[0]`
+  indexing silently sliced off the first batch element instead of
+  unpacking a tuple, corrupting every encoder layer after the first.
+
+- modeling_moss_audio.py: rewrote `MossAudioModel.prepare_inputs_for_generation`
+  to delegate the standard input-slicing/attention-mask/position-id
+  bookkeeping to `GenerationMixin.prepare_inputs_for_generation` (via
+  `super()`) instead of upstream's hand-rolled `cache_position[0] > 0`
+  check. transformers >=4.51's `generate()` drives slicing via a
+  `next_sequence_length` kwarg and no longer threads an updated
+  `cache_position` through `model_kwargs` between decode steps, so
+  upstream's check always saw prefill state, never sliced `input_ids`
+  down to the newest token on decode steps, and kept re-including the
+  prefill-length `audio_input_mask` against a growing `input_ids`/
+  `inputs_embeds`, causing a shape-mismatch crash in `forward` on the
+  first decode step. The rewritten version uses the base
+  implementation's `is_first_iteration` flag (passed correctly by
+  `generate()`) to gate the audio-specific kwargs instead. No other
+  changes.
 
 All other files are unmodified copies of the upstream source.
