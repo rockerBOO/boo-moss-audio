@@ -48,8 +48,8 @@ _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 # MiniMax Music 3 prompt generation splits the model's single response into
 # two ComfyUI outputs. Each regex captures everything after its label up to
 # the next label (or end of string); DOTALL so section text can span lines.
-_LYRICS_RE = re.compile(r"LYRICS:\s*(.*?)(?=STRUCTURED CAPTION:|\Z)", re.DOTALL)
-_CAPTION_RE = re.compile(r"STRUCTURED CAPTION:\s*(.*)", re.DOTALL)
+_LYRICS_RE = re.compile(r"LYRICS:\s*(.*?)(?=STYLE:|\Z)", re.DOTALL)
+_STYLE_RE = re.compile(r"STYLE:\s*(.*)", re.DOTALL)
 
 
 def _local_model_dir(repo_id: str) -> str:
@@ -68,6 +68,7 @@ def _run_moss_audio_generate(
     repetition_penalty: float,
     seed: int,
     strip_thinking: bool,
+    assistant_prefill: str = "",
 ) -> str:
     import comfy.model_management as model_management
 
@@ -83,6 +84,22 @@ def _run_moss_audio_generate(
     if sample_rate != target_sr:
         waveform = torchaudio.functional.resample(waveform, sample_rate, target_sr)
     raw_audio = waveform.cpu().numpy()
+
+    if assistant_prefill:
+        # MossAudioProcessor only auto-wraps `text` in the chat template when it
+        # contains no <|audio_bos|>...<|audio_eos|> span (see
+        # vendor/moss_audio/processing_moss_audio.py:_build_default_prompt). Building
+        # that span ourselves lets us seed the assistant turn with a forced opening
+        # (e.g. "LYRICS:\n") -- the 4B model is unreliable about emitting a required
+        # label on its own, but reliably continues from one that's already there.
+        prompt = (
+            "<|im_start|>system\n"
+            "You are a helpful assistant.<|im_end|>\n"
+            "<|im_start|>user\n"
+            "<|audio_bos|><|AUDIO|><|audio_eos|>\n"
+            f"{prompt}<|im_end|>\n"
+            f"<|im_start|>assistant\n{assistant_prefill}"
+        )
 
     inputs = processor(text=prompt, audios=[raw_audio], return_tensors="pt")
     inputs = inputs.to(hf_model.device)
@@ -122,6 +139,10 @@ def _run_moss_audio_generate(
     text = processor.decode(generated_ids[0, input_len:], skip_special_tokens=True)
     if strip_thinking:
         text = _THINK_BLOCK_RE.sub("", text).strip()
+    if assistant_prefill:
+        # The prefill was part of the input, not generated -- reattach it so
+        # downstream label parsing sees it.
+        text = assistant_prefill + text
 
     return text
 
@@ -320,9 +341,10 @@ class BooMossAudioMiniMaxMusic3PromptGenerate(io.ComfyNode):
             category="audio",
             description=(
                 "Runs a MOSS-Audio model over a reference audio clip and returns "
-                "the two inputs MiniMax Music 3 consumes: lyrics (with section "
-                "tags) and a structured caption (Global Metadata, Vocal Details, "
-                "Arrangement), split into separate outputs."
+                "lyrics (with MiniMax Music 3 section tags) and loose style notes, "
+                "split into separate outputs. Feed both into BooMusicCaptionRewriter's "
+                "`lyrics` and `style_keywords` inputs to get MiniMax's full "
+                "Structured Caption (Global Metadata, Vocal Details, Arrangement)."
             ),
             inputs=[
                 BooMossAudioModel.Input("moss_audio_model"),
@@ -330,83 +352,23 @@ class BooMossAudioMiniMaxMusic3PromptGenerate(io.ComfyNode):
                 io.String.Input(
                     "prompt",
                     multiline=True,
-                    default="""You are an audio analyst. Your job is to convert an audio clip into the two inputs
-MiniMax Music 3 actually consumes: **LYRICS** and **STRUCTURED CAPTION**. Do BOTH,
-in order, and do not skip either.
+                    default="""You are an audio analyst. Do BOTH of the following, in order, and do not skip either:
+1) LYRICS: Transcribe every sung word verbatim, in order, using MiniMax's section-tag contract. Break the song into sections using only these tags, in whatever order they actually occur: [intro] [verse] [pre-chorus] [chorus] [post-chorus] [bridge] [instrumental] [solo] [outro]. Every tag goes on its own line, with nothing else on that line — never write "[verse] Morning light...", put the tag and the lyric on separate lines. Under each tag, write the sung lyric lines exactly as sung, one line per line break. Instrumental passages get their own [instrumental] or [solo] tag with no lyric text underneath. Never repeat the same word, phrase, or sound more than twice in a row, even if that's what's audibly sung. If there is no singing at all, write "(none)".
+2) STYLE: In 2-4 sentences, describe the genre, tempo/mood, vocal character (if any), and key instruments you hear.
+Always label the two sections exactly "LYRICS:" and "STYLE:". Never repeat the same word, phrase, or sound more than twice in a row.
 
----
+Example output:
+LYRICS:
+[verse]
+Lights are low,
+we're moving slow,
+dancing where the shadows grow,
+holding on to what we know.
+[chorus]
+Hold on, hold on,
+STYLE: A mellow synth-pop track with a laid-back tempo, warm analog pads, and a soft four-on-the-floor beat. A female vocalist sings in a breathy, intimate style. The mood is dreamy and nostalgic.
 
-## 1) LYRICS
-
-Transcribe every sung word verbatim, in order, and lay it out using MiniMax's
-section-tag contract:
-
-- Break the song into sections using only these tags, in whatever order they
-  actually occur: `[intro] [verse] [pre-chorus] [chorus] [post-chorus] [bridge]
-  [instrumental] [solo] [outro]`.
-- **Every tag goes on its own line, with nothing else on that line.** Text placed
-  on the same line as a tag is silently dropped by MiniMax's input contract, so
-  never write `[verse] Morning light…` — the tag and the lyric must be on
-  separate lines.
-- Under each tag, write the sung lyric lines exactly as sung, one line per line
-  break, the way lyrics are normally printed.
-- Instrumental passages (solos, breakdowns with no vocal) get their own
-  `[instrumental]` or `[solo]` tag and no lyric text underneath.
-- If a section repeats near-verbatim (e.g. a repeated chorus), still transcribe
-  it in full under its own tag — don't abbreviate with "repeat chorus."
-- Never repeat the same word, phrase, or sound more than twice in a row, even if
-  that's what's audibly sung (e.g. long ad-lib repetitions) — cap it at two and
-  note the effect in STRUCTURED CAPTION instead (e.g. "extended repeated ad-lib
-  outro") rather than transcribing it exhaustively.
-- If there is **spoken (non-sung) dialogue**, note that MiniMax's lyric field has
-  no native tag for it. Transcribe it separately, after the tagged lyric block,
-  under a clearly marked heading `Spoken dialogue (not part of MiniMax lyric
-  input):`, in flowing prose, so the information isn't lost — but do not mix it
-  into the tagged section above.
-- If there is no speech or singing at all, write "(none)" for this whole section.
-
-## 2) STRUCTURED CAPTION
-
-Describe the music using exactly these three headings, in this order, ~250–450
-words total. This is the field that carries all musical control in MiniMax — the
-model follows it over time, not as one global tag.
-
-**Global Metadata**
-- Basic Attributes: genre/subgenres, tempo (exact BPM only if genuinely
-  confident; otherwise a qualitative tempo like "driving" or "unhurried"), and
-  key/scale only if clearly identifiable.
-- Global Emotional Progression: the arc from open to close as a story — where it
-  starts, where it peaks, how it resolves.
-- Application Scenarios & Imagery: a concrete scene the track evokes.
-- Sonics & Production Profile: stereo width, frequency balance, dynamics
-  (polished/compressed vs. natural/uncompressed).
-
-**Vocal Details** (omit this heading's content and state "instrumental — no
-vocal, lead melody carried by [instrument]" if there's no singing)
-- Vocal Gender & Timbre: explicit, e.g. "Singer A (Female), warm mezzo-soprano."
-- Vocal Style: delivery per section — restrained in verse, belted in chorus, etc.
-- Harmony/Backing Vocals: doubles, stacked harmonies, call-and-response, and where.
-- Vocal FX: reverb, delay, saturation — only where actually audible.
-
-**Arrangement**
-- Instrument Lifecycle (Primary/Secondary): what anchors the track start to
-  finish, what enters/exits/transforms along the way.
-- Groove & Foundation Progression: what the rhythm section does per section —
-  verse vs. chorus vs. bridge.
-- Embellishments, Textures & Spatial FX: risers, sweeps, reverb tails, ear candy.
-
----
-
-## Rules
-
-- Label the two outputs exactly `LYRICS:` and `STRUCTURED CAPTION:`.
-- Don't fabricate precision (exact BPM/key) you're not confident about.
-- An explicit vocal gender, instrumental requirement, or exclusion stated once
-  must not be contradicted later in the caption.
-- Keep the caption describing *music*, not words — lyric content stays in the
-  LYRICS section only.
-- Write the Global Emotional Progression as a story with tension, release, and
-  climax, not a static list of adjectives.""",
+Now analyze the given audio in the same format.""",
                 ),
                 io.Int.Input("max_new_tokens", default=4096, min=1, max=8192),
                 io.Float.Input("temperature", default=1.0, min=0.0, max=2.0, step=0.01),
@@ -429,7 +391,7 @@ vocal, lead melody carried by [instrument]" if there's no singing)
             ],
             outputs=[
                 io.String.Output("lyrics"),
-                io.String.Output("structured_caption"),
+                io.String.Output("style_notes"),
             ],
         )
 
@@ -458,15 +420,18 @@ vocal, lead melody carried by [instrument]" if there's no singing)
             repetition_penalty=repetition_penalty,
             seed=seed,
             strip_thinking=strip_thinking,
+            assistant_prefill="LYRICS:\n",
         )
 
         lyrics_match = _LYRICS_RE.search(text)
         lyrics = lyrics_match.group(1).strip() if lyrics_match else ""
 
-        caption_match = _CAPTION_RE.search(text)
-        structured_caption = caption_match.group(1).strip() if caption_match else ""
+        style_match = _STYLE_RE.search(text)
+        style_notes = style_match.group(1).strip() if style_match else ""
 
-        return io.NodeOutput(lyrics, structured_caption)
+        logging.info("BooMossAudioMiniMaxMusic3PromptGenerate raw output:\n%s", text)
+
+        return io.NodeOutput(lyrics, style_notes)
 
 
 class BooMusicCaptionRewriter(io.ComfyNode):

@@ -46,46 +46,46 @@ def test_think_block_regex_strips_reasoning_but_keeps_the_answer():
 
 
 _LYRICS_RE = nodes._LYRICS_RE
-_CAPTION_RE = nodes._CAPTION_RE
+_STYLE_RE = nodes._STYLE_RE
 
 
-def test_lyrics_and_caption_regexes_split_both_labeled_sections():
+def test_lyrics_and_style_regexes_split_both_labeled_sections():
     text = (
         "LYRICS:\n"
         "[verse]\n"
         "Lights are low\n"
-        "STRUCTURED CAPTION:\n"
+        "STYLE:\n"
         "Global Metadata\n"
         "A mellow synth-pop track."
     )
     lyrics_match = _LYRICS_RE.search(text)
-    caption_match = _CAPTION_RE.search(text)
+    style_match = _STYLE_RE.search(text)
     assert lyrics_match.group(1).strip() == "[verse]\nLights are low"
-    assert caption_match.group(1).strip() == "Global Metadata\nA mellow synth-pop track."
+    assert style_match.group(1).strip() == "Global Metadata\nA mellow synth-pop track."
 
 
-def test_lyrics_regex_returns_none_when_only_caption_present():
-    text = "STRUCTURED CAPTION:\nA mellow synth-pop track."
+def test_lyrics_regex_returns_none_when_only_style_present():
+    text = "STYLE:\nA mellow synth-pop track."
     assert _LYRICS_RE.search(text) is None
-    assert _CAPTION_RE.search(text).group(1).strip() == "A mellow synth-pop track."
+    assert _STYLE_RE.search(text).group(1).strip() == "A mellow synth-pop track."
 
 
-def test_caption_regex_returns_none_when_only_lyrics_present():
+def test_style_regex_returns_none_when_only_lyrics_present():
     text = "LYRICS:\n[verse]\nLights are low"
     assert _LYRICS_RE.search(text).group(1).strip() == "[verse]\nLights are low"
-    assert _CAPTION_RE.search(text) is None
+    assert _STYLE_RE.search(text) is None
 
 
 def test_both_regexes_return_none_when_neither_label_present():
     text = "The model produced plain unlabeled text."
     assert _LYRICS_RE.search(text) is None
-    assert _CAPTION_RE.search(text) is None
+    assert _STYLE_RE.search(text) is None
 
 
 def test_lyrics_regex_handles_empty_section_between_labels():
-    text = "LYRICS:\nSTRUCTURED CAPTION:\nSome caption text."
+    text = "LYRICS:\nSTYLE:\nSome caption text."
     assert _LYRICS_RE.search(text).group(1).strip() == ""
-    assert _CAPTION_RE.search(text).group(1).strip() == "Some caption text."
+    assert _STYLE_RE.search(text).group(1).strip() == "Some caption text."
 
 
 MossAudioModel = nodes.MossAudioModel
@@ -178,6 +178,43 @@ def _generate_kwargs(**overrides):
     )
     kwargs.update(overrides)
     return kwargs
+
+
+def test_run_moss_audio_generate_assistant_prefill_wraps_prompt_and_reattaches_label(
+    monkeypatch,
+):
+    patcher = _FakePatcher(
+        SimpleNamespace(
+            device="cpu",
+            dtype=torch.float32,
+            generate=lambda **kwargs: torch.tensor([[1, 2, 3, 4, 5]]),
+        )
+    )
+    monkeypatch.setattr(comfy.model_management, "load_models_gpu", lambda models, **kwargs: None)
+
+    captured = {}
+
+    class _CapturingProcessor(_FakeProcessor):
+        def __call__(self, text, audios, return_tensors):
+            captured["text"] = text
+            return super().__call__(text, audios, return_tensors)
+
+        def decode(self, ids, skip_special_tokens=True):
+            return "[verse]\nLights are low"
+
+    text = nodes._run_moss_audio_generate(
+        moss_audio_model={"patcher": patcher, "processor": _CapturingProcessor()},
+        **_generate_kwargs(assistant_prefill="LYRICS:\n"),
+    )
+
+    # The prompt sent to the processor must embed the audio span itself so
+    # MossAudioProcessor skips its own chat-template auto-wrap and uses our
+    # assistant-seeded prompt verbatim.
+    assert "<|audio_bos|><|AUDIO|><|audio_eos|>" in captured["text"]
+    assert captured["text"].endswith("<|im_start|>assistant\nLYRICS:\n")
+    # The prefill isn't part of what the model generated, so it's reattached
+    # to the decoded output here rather than expected from decode() itself.
+    assert text == "LYRICS:\n[verse]\nLights are low"
 
 
 def test_generate_registers_patcher_with_load_models_gpu_and_uses_patcher_model(monkeypatch):
@@ -300,7 +337,7 @@ def test_minimax_prompt_generate_schema_has_two_string_outputs():
     assert inputs_by_id["moss_audio_model"].io_type == "BOO_MOSS_AUDIO_MODEL"
     assert inputs_by_id["audio"].io_type == "AUDIO"
     assert [o.io_type for o in schema.outputs] == ["STRING", "STRING"]
-    assert [o.id for o in schema.outputs] == ["lyrics", "structured_caption"]
+    assert [o.id for o in schema.outputs] == ["lyrics", "style_notes"]
 
 
 def test_minimax_prompt_generate_splits_labeled_output_into_two_results(monkeypatch):
@@ -315,10 +352,9 @@ def test_minimax_prompt_generate_splits_labeled_output_into_two_results(monkeypa
 
     class _LabeledProcessor(_FakeProcessor):
         def decode(self, ids, skip_special_tokens=True):
-            return (
-                "LYRICS:\n[verse]\nLights are low\n"
-                "STRUCTURED CAPTION:\nA mellow synth-pop track."
-            )
+            # The "LYRICS:\n" label itself is supplied by the assistant-turn
+            # prefill, not generated -- decode() only returns what comes after it.
+            return "[verse]\nLights are low\nSTYLE:\nA mellow synth-pop track."
 
     output = BooMossAudioMiniMaxMusic3PromptGenerate.execute(
         moss_audio_model={"patcher": patcher, "processor": _LabeledProcessor()},
@@ -339,12 +375,12 @@ def test_minimax_prompt_generate_returns_empty_string_for_missing_label(monkeypa
     )
     monkeypatch.setattr(comfy.model_management, "load_models_gpu", lambda models, **kwargs: None)
 
-    class _CaptionOnlyProcessor(_FakeProcessor):
+    class _StyleOnlyProcessor(_FakeProcessor):
         def decode(self, ids, skip_special_tokens=True):
-            return "STRUCTURED CAPTION:\nA mellow synth-pop track."
+            return "STYLE:\nA mellow synth-pop track."
 
     output = BooMossAudioMiniMaxMusic3PromptGenerate.execute(
-        moss_audio_model={"patcher": patcher, "processor": _CaptionOnlyProcessor()},
+        moss_audio_model={"patcher": patcher, "processor": _StyleOnlyProcessor()},
         **_generate_kwargs(),
     )
 
@@ -352,7 +388,9 @@ def test_minimax_prompt_generate_returns_empty_string_for_missing_label(monkeypa
     assert output.args[1] == "A mellow synth-pop track."
 
 
-def test_minimax_prompt_generate_returns_empty_strings_for_unlabeled_output(monkeypatch):
+def test_minimax_prompt_generate_prefill_guarantees_lyrics_label_even_when_style_label_is_missing(
+    monkeypatch,
+):
     patcher = _FakePatcher(
         SimpleNamespace(
             device="cpu",
@@ -371,7 +409,11 @@ def test_minimax_prompt_generate_returns_empty_strings_for_unlabeled_output(monk
         **_generate_kwargs(),
     )
 
-    assert output.args[0] == ""
+    # The assistant-turn prefill ("LYRICS:\n") guarantees the LYRICS: label always
+    # exists, so a model that skips straight to unlabeled prose lands in `lyrics`
+    # rather than vanishing into two empty outputs -- there's just no way to tell
+    # it apart from real lyrics without the STYLE: boundary.
+    assert output.args[0] == "This is a mellow synth-pop track with a dreamy chorus."
     assert output.args[1] == ""
 
 
