@@ -45,10 +45,106 @@ MOSS_AUDIO_REPOS = {
 # consumers want the answer only, so BooMossAudioGenerate strips it by default.
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
+# MiniMax Music 3 prompt generation splits the model's single response into
+# two ComfyUI outputs. Each regex captures everything after its label up to
+# the next label (or end of string); DOTALL so section text can span lines.
+_LYRICS_RE = re.compile(r"LYRICS:\s*(.*?)(?=STYLE:|\Z)", re.DOTALL)
+_STYLE_RE = re.compile(r"STYLE:\s*(.*)", re.DOTALL)
+
 
 def _local_model_dir(repo_id: str) -> str:
     folder = folder_paths.get_folder_paths(MOSS_AUDIO_FOLDER)[0]
     return os.path.join(folder, repo_id.split("/", 1)[1])
+
+
+def _run_moss_audio_generate(
+    moss_audio_model: dict,
+    audio: dict,
+    prompt: str,
+    max_new_tokens: int,
+    temperature: float,
+    top_p: float,
+    top_k: int,
+    repetition_penalty: float,
+    seed: int,
+    strip_thinking: bool,
+    assistant_prefill: str = "",
+) -> str:
+    import comfy.model_management as model_management
+
+    patcher = moss_audio_model["patcher"]
+    processor = moss_audio_model["processor"]
+
+    model_management.load_models_gpu([patcher], force_full_load=True)
+    hf_model = patcher.model
+
+    waveform = audio["waveform"][0].mean(dim=0)  # downmix to mono: [samples]
+    sample_rate = audio["sample_rate"]
+    target_sr = processor.config.mel_sr
+    if sample_rate != target_sr:
+        waveform = torchaudio.functional.resample(waveform, sample_rate, target_sr)
+    raw_audio = waveform.cpu().numpy()
+
+    if assistant_prefill:
+        # MossAudioProcessor only auto-wraps `text` in the chat template when it
+        # contains no <|audio_bos|>...<|audio_eos|> span (see
+        # vendor/moss_audio/processing_moss_audio.py:_build_default_prompt). Building
+        # that span ourselves lets us seed the assistant turn with a forced opening
+        # (e.g. "LYRICS:\n") -- the 4B model is unreliable about emitting a required
+        # label on its own, but reliably continues from one that's already there.
+        prompt = (
+            "<|im_start|>system\n"
+            "You are a helpful assistant.<|im_end|>\n"
+            "<|im_start|>user\n"
+            "<|audio_bos|><|AUDIO|><|audio_eos|>\n"
+            f"{prompt}<|im_end|>\n"
+            f"<|im_start|>assistant\n{assistant_prefill}"
+        )
+
+    inputs = processor(text=prompt, audios=[raw_audio], return_tensors="pt")
+    inputs = inputs.to(hf_model.device)
+    if inputs.get("audio_data") is not None:
+        inputs["audio_data"] = inputs["audio_data"].to(hf_model.dtype)
+    inputs["audio_input_mask"] = inputs["input_ids"] == processor.audio_token_id
+
+    # transformers' GenerationMixin.generate() has no `generator` kwarg --
+    # sampling draws from torch's global RNG, so seeding it here is the
+    # only way to make do_sample=True runs reproducible.
+    torch.manual_seed(seed)
+
+    try:
+        with torch.no_grad():
+            generated_ids = hf_model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=temperature > 0.0,
+                num_beams=1,
+                temperature=max(temperature, 1e-5),
+                top_p=top_p,
+                top_k=top_k,
+                repetition_penalty=repetition_penalty,
+                use_cache=True,
+            )
+    finally:
+        # A steady-state MOSS-Audio load doesn't need to unload the model
+        # itself after every call -- load_models_gpu is idempotent, so
+        # the next call just reuses the resident weights. But transient
+        # CUDA state from this generate() call (KV cache, activations)
+        # should still be released here, including on the exception path
+        # (KeyboardInterrupt / ComfyUI's own interrupt exception).
+        gc.collect()
+        model_management.soft_empty_cache(force=True)
+
+    input_len = inputs["input_ids"].shape[1]
+    text = processor.decode(generated_ids[0, input_len:], skip_special_tokens=True)
+    if strip_thinking:
+        text = _THINK_BLOCK_RE.sub("", text).strip()
+    if assistant_prefill:
+        # The prefill was part of the input, not generated -- reattach it so
+        # downstream label parsing sees it.
+        text = assistant_prefill + text
+
+    return text
 
 
 def _make_device_settable(model):
@@ -221,61 +317,121 @@ Now analyze the given audio in the same format.""",
         seed: int,
         strip_thinking: bool,
     ) -> io.NodeOutput:
-        import comfy.model_management as model_management
-
-        patcher = moss_audio_model["patcher"]
-        processor = moss_audio_model["processor"]
-
-        model_management.load_models_gpu([patcher], force_full_load=True)
-        hf_model = patcher.model
-
-        waveform = audio["waveform"][0].mean(dim=0)  # downmix to mono: [samples]
-        sample_rate = audio["sample_rate"]
-        target_sr = processor.config.mel_sr
-        if sample_rate != target_sr:
-            waveform = torchaudio.functional.resample(waveform, sample_rate, target_sr)
-        raw_audio = waveform.cpu().numpy()
-
-        inputs = processor(text=prompt, audios=[raw_audio], return_tensors="pt")
-        inputs = inputs.to(hf_model.device)
-        if inputs.get("audio_data") is not None:
-            inputs["audio_data"] = inputs["audio_data"].to(hf_model.dtype)
-        inputs["audio_input_mask"] = inputs["input_ids"] == processor.audio_token_id
-
-        # transformers' GenerationMixin.generate() has no `generator` kwarg --
-        # sampling draws from torch's global RNG, so seeding it here is the
-        # only way to make do_sample=True runs reproducible.
-        torch.manual_seed(seed)
-
-        try:
-            with torch.no_grad():
-                generated_ids = hf_model.generate(
-                    **inputs,
-                    max_new_tokens=max_new_tokens,
-                    do_sample=temperature > 0.0,
-                    num_beams=1,
-                    temperature=max(temperature, 1e-5),
-                    top_p=top_p,
-                    top_k=top_k,
-                    repetition_penalty=repetition_penalty,
-                    use_cache=True,
-                )
-        finally:
-            # A steady-state MOSS-Audio load doesn't need to unload the model
-            # itself after every call -- load_models_gpu is idempotent, so
-            # the next call just reuses the resident weights. But transient
-            # CUDA state from this generate() call (KV cache, activations)
-            # should still be released here, including on the exception path
-            # (KeyboardInterrupt / ComfyUI's own interrupt exception).
-            gc.collect()
-            model_management.soft_empty_cache(force=True)
-
-        input_len = inputs["input_ids"].shape[1]
-        text = processor.decode(generated_ids[0, input_len:], skip_special_tokens=True)
-        if strip_thinking:
-            text = _THINK_BLOCK_RE.sub("", text).strip()
-
+        text = _run_moss_audio_generate(
+            moss_audio_model=moss_audio_model,
+            audio=audio,
+            prompt=prompt,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            repetition_penalty=repetition_penalty,
+            seed=seed,
+            strip_thinking=strip_thinking,
+        )
         return io.NodeOutput(text)
+
+
+class BooMossAudioMiniMaxMusic3PromptGenerate(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="BooMossAudioMiniMaxMusic3PromptGenerate",
+            display_name="BOO MOSS-Audio MiniMax Music 3 Prompt Generate",
+            category="audio",
+            description=(
+                "Runs a MOSS-Audio model over a reference audio clip and returns "
+                "lyrics (with MiniMax Music 3 section tags) and loose style notes, "
+                "split into separate outputs. Feed both into BooMusicCaptionRewriter's "
+                "`lyrics` and `style_keywords` inputs to get MiniMax's full "
+                "Structured Caption (Global Metadata, Vocal Details, Arrangement)."
+            ),
+            inputs=[
+                BooMossAudioModel.Input("moss_audio_model"),
+                io.Audio.Input("audio"),
+                io.String.Input(
+                    "prompt",
+                    multiline=True,
+                    default="""You are an audio analyst. Do BOTH of the following, in order, and do not skip either:
+1) LYRICS: Transcribe every sung word verbatim, in order, using MiniMax's section-tag contract. Break the song into sections using only these tags, in whatever order they actually occur: [intro] [verse] [pre-chorus] [chorus] [post-chorus] [bridge] [instrumental] [solo] [outro]. Every tag goes on its own line, with nothing else on that line — never write "[verse] Morning light...", put the tag and the lyric on separate lines. Under each tag, write the sung lyric lines exactly as sung, one line per line break. Instrumental passages get their own [instrumental] or [solo] tag with no lyric text underneath. Never repeat the same word, phrase, or sound more than twice in a row, even if that's what's audibly sung. If there is no singing at all, write "(none)".
+2) STYLE: In 2-4 sentences, describe the genre, tempo/mood, vocal character (if any), and key instruments you hear.
+Always label the two sections exactly "LYRICS:" and "STYLE:". Never repeat the same word, phrase, or sound more than twice in a row.
+
+Example output:
+LYRICS:
+[verse]
+Lights are low,
+we're moving slow,
+dancing where the shadows grow,
+holding on to what we know.
+[chorus]
+Hold on, hold on,
+STYLE: A mellow synth-pop track with a laid-back tempo, warm analog pads, and a soft four-on-the-floor beat. A female vocalist sings in a breathy, intimate style. The mood is dreamy and nostalgic.
+
+Now analyze the given audio in the same format.""",
+                ),
+                io.Int.Input("max_new_tokens", default=4096, min=1, max=8192),
+                io.Float.Input("temperature", default=1.0, min=0.0, max=2.0, step=0.01),
+                io.Float.Input("top_p", default=1.0, min=0.0, max=1.0, step=0.01),
+                io.Int.Input("top_k", default=50, min=0, max=500),
+                io.Float.Input("repetition_penalty", default=1.0, min=1.0, max=2.0, step=0.01),
+                io.Int.Input(
+                    "seed",
+                    default=0,
+                    min=0,
+                    max=0xFFFFFFFFFFFFFFFF,
+                    control_after_generate=True,
+                    tooltip="Seed for sampling (only affects output when temperature > 0).",
+                ),
+                io.Boolean.Input(
+                    "strip_thinking",
+                    default=True,
+                    tooltip="Remove <think>...</think> reasoning blocks from Thinking-variant output.",
+                ),
+            ],
+            outputs=[
+                io.String.Output("lyrics"),
+                io.String.Output("style_notes"),
+            ],
+        )
+
+    @classmethod
+    def execute(
+        cls,
+        moss_audio_model: dict,
+        audio: dict,
+        prompt: str,
+        max_new_tokens: int,
+        temperature: float,
+        top_p: float,
+        top_k: int,
+        repetition_penalty: float,
+        seed: int,
+        strip_thinking: bool,
+    ) -> io.NodeOutput:
+        text = _run_moss_audio_generate(
+            moss_audio_model=moss_audio_model,
+            audio=audio,
+            prompt=prompt,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            repetition_penalty=repetition_penalty,
+            seed=seed,
+            strip_thinking=strip_thinking,
+            assistant_prefill="LYRICS:\n",
+        )
+
+        lyrics_match = _LYRICS_RE.search(text)
+        lyrics = lyrics_match.group(1).strip() if lyrics_match else ""
+
+        style_match = _STYLE_RE.search(text)
+        style_notes = style_match.group(1).strip() if style_match else ""
+
+        logging.info("BooMossAudioMiniMaxMusic3PromptGenerate raw output:\n%s", text)
+
+        return io.NodeOutput(lyrics, style_notes)
 
 
 class BooMusicCaptionRewriter(io.ComfyNode):
@@ -336,6 +492,7 @@ class BooMossAudioExtension(ComfyExtension):
         return [
             BooMossAudioLoader,
             BooMossAudioGenerate,
+            BooMossAudioMiniMaxMusic3PromptGenerate,
             BooMusicCaptionRewriter,
         ]
 
