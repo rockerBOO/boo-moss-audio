@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import comfy.model_management
 import comfy.model_patcher
+import comfy.utils
 import torch
 
 nodes = sys.modules["boo_moss_audio_nodes"]
@@ -364,6 +365,56 @@ def test_make_device_settable_allows_assigning_device_after_patch():
     new_device = torch.device("cpu")
     patched.device = new_device
     assert patched.device == new_device
+
+
+def test_generate_wires_progress_bar_and_interrupt_check_into_stopping_criteria(monkeypatch):
+    captured = {}
+
+    class FakeHFModel:
+        device = "cpu"
+        dtype = torch.float32
+
+        def generate(self, **kwargs):
+            captured["kwargs"] = kwargs
+            return torch.tensor([[1, 2, 3, 4, 5]])
+
+    patcher = _FakePatcher(FakeHFModel())
+    monkeypatch.setattr(comfy.model_management, "load_models_gpu", lambda models, **kwargs: None)
+    monkeypatch.setattr(comfy.model_management, "soft_empty_cache", lambda force=False: None)
+
+    pbar_updates = []
+    interrupt_checks = []
+
+    class FakeProgressBar:
+        def __init__(self, total):
+            pbar_updates.append(("init", total))
+
+        def update(self, value):
+            pbar_updates.append(("update", value))
+
+    monkeypatch.setattr(comfy.utils, "ProgressBar", FakeProgressBar)
+    monkeypatch.setattr(
+        comfy.model_management,
+        "throw_exception_if_processing_interrupted",
+        lambda: interrupt_checks.append(True),
+    )
+
+    BooMossAudioGenerate.execute(
+        moss_audio_model={"patcher": patcher, "processor": _FakeProcessor()},
+        **_generate_kwargs(max_new_tokens=8),
+    )
+
+    assert pbar_updates[0] == ("init", 8)
+
+    stopping_criteria = captured["kwargs"]["stopping_criteria"]
+    from transformers import StoppingCriteriaList
+
+    assert isinstance(stopping_criteria, StoppingCriteriaList)
+    result = stopping_criteria[0](input_ids=torch.tensor([[1]]), scores=None)
+
+    assert result is False
+    assert interrupt_checks == [True]
+    assert ("update", 1) in pbar_updates
 
 
 def test_generate_still_cleans_up_and_reraises_on_generate_failure(monkeypatch):

@@ -60,6 +60,26 @@ _LYRICS_RE = re.compile(r"LYRICS:\s*(.*?)(?=STYLE:|\Z)", re.DOTALL)
 _STYLE_RE = re.compile(r"STYLE:\s*(.*)", re.DOTALL)
 
 
+class _ComfyProgressStoppingCriteria:
+    """Drives a comfy.utils.ProgressBar off transformers' per-token generation
+    loop (StoppingCriteria is called once per generated token in
+    GenerationMixin._sample, regardless of do_sample/greedy) so the Comfy UI
+    shows live progress for generate() calls, which otherwise look hung for
+    the full max_new_tokens duration. Also makes the queue's Cancel button
+    work mid-generation, since generate() has no interrupt hook of its own.
+    """
+
+    def __init__(self, pbar):
+        self.pbar = pbar
+
+    def __call__(self, input_ids, scores, **kwargs):
+        import comfy.model_management as model_management
+
+        model_management.throw_exception_if_processing_interrupted()
+        self.pbar.update(1)
+        return False
+
+
 def _local_model_dir(repo_id: str) -> str:
     folder = folder_paths.get_folder_paths(MOSS_AUDIO_FOLDER)[0]
     return os.path.join(folder, repo_id.split("/", 1)[1])
@@ -120,6 +140,12 @@ def _run_moss_audio_generate(
     # only way to make do_sample=True runs reproducible.
     torch.manual_seed(seed)
 
+    import comfy.utils
+    from transformers import StoppingCriteriaList
+
+    pbar = comfy.utils.ProgressBar(max_new_tokens)
+    stopping_criteria = StoppingCriteriaList([_ComfyProgressStoppingCriteria(pbar)])
+
     try:
         with torch.no_grad():
             generated_ids = hf_model.generate(
@@ -132,6 +158,7 @@ def _run_moss_audio_generate(
                 top_k=top_k,
                 repetition_penalty=repetition_penalty,
                 use_cache=True,
+                stopping_criteria=stopping_criteria,
             )
     finally:
         # A steady-state MOSS-Audio load doesn't need to unload the model
