@@ -34,7 +34,11 @@ jobs:
         working-directory: ComfyUI/custom_nodes/boo-moss-audio
 
       - name: Install test dependencies
-        run: pip install "pytest>=8.0.0" "pytest-asyncio>=0.24.0"
+        # accelerate isn't in requirements.txt (see the comment there -- it's
+        # expected to come from ComfyUI's own pyproject.toml in real installs),
+        # but this job only installs ComfyUI's requirements.txt, so it needs
+        # to be added here for the quantized-loading tests to import it.
+        run: pip install "pytest>=8.0.0" "pytest-asyncio>=0.24.0" accelerate
 
       - name: Run tests
         run: pytest
