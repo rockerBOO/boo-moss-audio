@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import comfy.model_management
 import comfy.model_patcher
+import comfy.utils
 import torch
 
 nodes = sys.modules["boo_moss_audio_nodes"]
@@ -101,6 +102,21 @@ class _FakeHFModel(torch.nn.Module):
 def test_loader_wraps_model_in_model_patcher_with_pinned_dtype(monkeypatch, tmp_path):
     monkeypatch.setattr(nodes, "_local_model_dir", lambda repo_id: str(tmp_path))
     (tmp_path / "config.json").write_text("{}")
+    # Stub safetensors file so the content-aware reuse guard treats this dir as
+    # already downloaded and skips snapshot_download (see download_calls assertion
+    # below) -- without this, this test previously performed a real ~9.8GB network
+    # download of the model on every run.
+    (tmp_path / "model.safetensors").write_text("")
+
+    download_calls = []
+
+    def fake_snapshot_download(**kwargs):
+        download_calls.append(kwargs)
+        return str(tmp_path)
+
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", fake_snapshot_download)
 
     fake_model = _FakeHFModel()
     captured = {}
@@ -118,7 +134,9 @@ def test_loader_wraps_model_in_model_patcher_with_pinned_dtype(monkeypatch, tmp_
         MossAudioProcessor, "from_pretrained", staticmethod(fake_processor_from_pretrained)
     )
 
-    output = BooMossAudioLoader.execute(model="MOSS-Audio-4B-Instruct", enable_time_marker=True)
+    output = BooMossAudioLoader.execute(
+        model="MOSS-Audio-4B-Instruct", enable_time_marker=True, quantized=False
+    )
     result = output.args[0]
 
     assert captured["local_dir"] == str(tmp_path)
@@ -136,6 +154,54 @@ def test_loader_wraps_model_in_model_patcher_with_pinned_dtype(monkeypatch, tmp_
     assert patcher.model is fake_model
     assert patcher.load_device == comfy.model_management.get_torch_device()
     assert patcher.offload_device == comfy.model_management.unet_offload_device()
+
+    assert download_calls == [], (
+        "local_dir already has a *.safetensors file -- snapshot_download must not be called"
+    )
+
+
+def test_loader_redownloads_when_local_dir_has_only_config_no_safetensors(monkeypatch, tmp_path):
+    # Regression test: a prior quantized-path run may have populated local_dir with
+    # only the restricted config/tokenizer subset (allow_patterns=["*.json", ...]),
+    # no *.safetensors shards. The non-quantized path's reuse guard must not treat
+    # that as "already downloaded" -- it must detect the missing safetensors and
+    # trigger a real snapshot_download, not silently skip straight to
+    # MossAudioModel.from_pretrained() and blow up with a bare FileNotFoundError.
+    monkeypatch.setattr(nodes, "_local_model_dir", lambda repo_id: str(tmp_path))
+    (tmp_path / "config.json").write_text("{}")
+    (tmp_path / "tokenizer.json").write_text("{}")
+
+    download_calls = []
+
+    def fake_snapshot_download(**kwargs):
+        download_calls.append(kwargs)
+        (tmp_path / "model-00001-of-00001.safetensors").write_text("fake weights")
+        return str(tmp_path)
+
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", fake_snapshot_download)
+
+    fake_model = _FakeHFModel()
+    monkeypatch.setattr(
+        MossAudioModel,
+        "from_pretrained",
+        staticmethod(lambda local_dir, dtype: fake_model),
+    )
+    monkeypatch.setattr(
+        MossAudioProcessor,
+        "from_pretrained",
+        staticmethod(lambda local_dir, enable_time_marker: object()),
+    )
+
+    BooMossAudioLoader.execute(
+        model="MOSS-Audio-4B-Instruct", enable_time_marker=True, quantized=False
+    )
+
+    assert len(download_calls) == 1, "expected the incomplete local_dir to trigger a re-download"
+    assert "allow_patterns" not in download_calls[0], (
+        "the non-quantized path's re-download must be the full, unrestricted snapshot_download"
+    )
 
 
 class _FakePatcher:
@@ -301,6 +367,56 @@ def test_make_device_settable_allows_assigning_device_after_patch():
     assert patched.device == new_device
 
 
+def test_generate_wires_progress_bar_and_interrupt_check_into_stopping_criteria(monkeypatch):
+    captured = {}
+
+    class FakeHFModel:
+        device = "cpu"
+        dtype = torch.float32
+
+        def generate(self, **kwargs):
+            captured["kwargs"] = kwargs
+            return torch.tensor([[1, 2, 3, 4, 5]])
+
+    patcher = _FakePatcher(FakeHFModel())
+    monkeypatch.setattr(comfy.model_management, "load_models_gpu", lambda models, **kwargs: None)
+    monkeypatch.setattr(comfy.model_management, "soft_empty_cache", lambda force=False: None)
+
+    pbar_updates = []
+    interrupt_checks = []
+
+    class FakeProgressBar:
+        def __init__(self, total):
+            pbar_updates.append(("init", total))
+
+        def update(self, value):
+            pbar_updates.append(("update", value))
+
+    monkeypatch.setattr(comfy.utils, "ProgressBar", FakeProgressBar)
+    monkeypatch.setattr(
+        comfy.model_management,
+        "throw_exception_if_processing_interrupted",
+        lambda: interrupt_checks.append(True),
+    )
+
+    BooMossAudioGenerate.execute(
+        moss_audio_model={"patcher": patcher, "processor": _FakeProcessor()},
+        **_generate_kwargs(max_new_tokens=8),
+    )
+
+    assert pbar_updates[0] == ("init", 8)
+
+    stopping_criteria = captured["kwargs"]["stopping_criteria"]
+    from transformers import StoppingCriteriaList
+
+    assert isinstance(stopping_criteria, StoppingCriteriaList)
+    result = stopping_criteria[0](input_ids=torch.tensor([[1]]), scores=None)
+
+    assert result is False
+    assert interrupt_checks == [True]
+    assert ("update", 1) in pbar_updates
+
+
 def test_generate_still_cleans_up_and_reraises_on_generate_failure(monkeypatch):
     class FailingHFModel:
         device = "cpu"
@@ -423,3 +539,37 @@ def test_minimax_prompt_generate_is_registered_in_extension_node_list():
     extension = nodes.BooMossAudioExtension()
     node_list = asyncio.run(extension.get_node_list())
     assert BooMossAudioMiniMaxMusic3PromptGenerate in node_list
+
+
+def test_quantized_toggle_rejects_unpublished_model(monkeypatch, tmp_path):
+    monkeypatch.setattr(nodes, "_local_model_dir", lambda repo_id: str(tmp_path))
+    (tmp_path / "config.json").write_text("{}")
+    monkeypatch.setattr(
+        "comfy.model_management.supports_nvfp4_compute", lambda device=None: True
+    )
+    try:
+        BooMossAudioLoader.execute(
+            model="MOSS-Audio-4B-Instruct",  # not in MOSS_AUDIO_QUANTIZED_REPOS
+            enable_time_marker=True,
+            quantized=True,
+        )
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "No quantized checkpoint published" in str(e)
+
+
+def test_quantized_toggle_rejects_non_blackwell_hardware(monkeypatch, tmp_path):
+    monkeypatch.setattr(nodes, "_local_model_dir", lambda repo_id: str(tmp_path))
+    (tmp_path / "config.json").write_text("{}")
+    monkeypatch.setattr(
+        "comfy.model_management.supports_nvfp4_compute", lambda device=None: False
+    )
+    try:
+        BooMossAudioLoader.execute(
+            model="MOSS-Audio-8B-Thinking",
+            enable_time_marker=True,
+            quantized=True,
+        )
+        assert False, "expected RuntimeError"
+    except RuntimeError as e:
+        assert "Blackwell" in str(e)

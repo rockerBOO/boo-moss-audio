@@ -29,3 +29,4 @@ extend-exclude = ["vendor"]
 # comfy.model_management is imported.
 "tests_gpu/conftest.py" = ["E402"]
 "tests_gpu/test_moss_audio_gpu_roundtrip.py" = ["E402"]
+"tests_gpu/test_moss_audio_quantized_gpu_roundtrip.py" = ["E402"]

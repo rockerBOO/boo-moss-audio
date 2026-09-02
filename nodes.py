@@ -1,4 +1,5 @@
 import gc
+import glob
 import logging
 import os
 import re
@@ -40,6 +41,13 @@ MOSS_AUDIO_REPOS = {
     "MOSS-Audio-8B-Thinking": "OpenMOSS-Team/MOSS-Audio-8B-Thinking",
 }
 
+# Only the 8B-Thinking variant has a published NVFP4+ConvRot-INT8 quantization as of
+# this writing -- see quant-tooling's docs/superpowers/plans/
+# 2026-08-24-moss-audio-8b-thinking-quant-recipe.md for how it was produced.
+MOSS_AUDIO_QUANTIZED_REPOS = {
+    "MOSS-Audio-8B-Thinking": "rockerBOO/moss-audio-8b-thinking-nvfp4-convrot-int8",
+}
+
 # MOSS-Audio's Thinking variants wrap chain-of-thought reasoning in
 # <think>...</think> before the actual answer. Downstream prompt-enhancement
 # consumers want the answer only, so BooMossAudioGenerate strips it by default.
@@ -50,6 +58,26 @@ _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 # the next label (or end of string); DOTALL so section text can span lines.
 _LYRICS_RE = re.compile(r"LYRICS:\s*(.*?)(?=STYLE:|\Z)", re.DOTALL)
 _STYLE_RE = re.compile(r"STYLE:\s*(.*)", re.DOTALL)
+
+
+class _ComfyProgressStoppingCriteria:
+    """Drives a comfy.utils.ProgressBar off transformers' per-token generation
+    loop (StoppingCriteria is called once per generated token in
+    GenerationMixin._sample, regardless of do_sample/greedy) so the Comfy UI
+    shows live progress for generate() calls, which otherwise look hung for
+    the full max_new_tokens duration. Also makes the queue's Cancel button
+    work mid-generation, since generate() has no interrupt hook of its own.
+    """
+
+    def __init__(self, pbar):
+        self.pbar = pbar
+
+    def __call__(self, input_ids, scores, **kwargs):
+        import comfy.model_management as model_management
+
+        model_management.throw_exception_if_processing_interrupted()
+        self.pbar.update(1)
+        return False
 
 
 def _local_model_dir(repo_id: str) -> str:
@@ -112,6 +140,12 @@ def _run_moss_audio_generate(
     # only way to make do_sample=True runs reproducible.
     torch.manual_seed(seed)
 
+    import comfy.utils
+    from transformers import StoppingCriteriaList
+
+    pbar = comfy.utils.ProgressBar(max_new_tokens)
+    stopping_criteria = StoppingCriteriaList([_ComfyProgressStoppingCriteria(pbar)])
+
     try:
         with torch.no_grad():
             generated_ids = hf_model.generate(
@@ -124,6 +158,7 @@ def _run_moss_audio_generate(
                 top_k=top_k,
                 repetition_penalty=repetition_penalty,
                 use_cache=True,
+                stopping_criteria=stopping_criteria,
             )
     finally:
         # A steady-state MOSS-Audio load doesn't need to unload the model
@@ -202,24 +237,82 @@ class BooMossAudioLoader(io.ComfyNode):
                     default=True,
                     tooltip="Insert explicit time tokens so the model can reason about when things happen.",
                 ),
+                io.Boolean.Input(
+                    "quantized",
+                    default=False,
+                    tooltip=(
+                        "Load the NVFP4+ConvRot-INT8 quantization instead of full precision. "
+                        "Requires a Blackwell GPU (SM >= 10.0) and is only available for models "
+                        "listed in MOSS_AUDIO_QUANTIZED_REPOS."
+                    ),
+                ),
             ],
             outputs=[BooMossAudioModel.Output(display_name="moss_audio_model")],
             search_aliases=["moss", "openmoss", "audio understanding", "asr", "captioning"],
         )
 
     @classmethod
-    def execute(cls, model: str, enable_time_marker: bool) -> io.NodeOutput:
+    def execute(
+        cls, model: str, enable_time_marker: bool, quantized: bool = False
+    ) -> io.NodeOutput:
         import comfy.model_patcher
         from comfy import model_management
         from huggingface_hub import snapshot_download
 
+        # Validate the quantized request *before* any download happens -- these checks
+        # are cheap and local, whereas the downloads below can be multi-GB. Doing this
+        # first means an unpublished-model or non-Blackwell-hardware request fails fast
+        # without ever touching the network or disk.
+        load_device = model_management.get_torch_device()
+        if quantized:
+            if model not in MOSS_AUDIO_QUANTIZED_REPOS:
+                raise ValueError(
+                    f"No quantized checkpoint published for {model!r}. "
+                    f"Available: {list(MOSS_AUDIO_QUANTIZED_REPOS)}"
+                )
+            if not model_management.supports_nvfp4_compute(load_device):
+                raise RuntimeError(
+                    "The quantized MOSS-Audio checkpoint requires a Blackwell GPU "
+                    "(SM >= 10.0) for NVFP4 compute; this device does not support it."
+                )
+
         repo_id = MOSS_AUDIO_REPOS[model]
         local_dir = _local_model_dir(repo_id)
-        if not os.path.isdir(local_dir) or not os.listdir(local_dir):
+        if quantized:
+            # On the quantized path, this repo is only used to source config.json
+            # and the tokenizer/processor files below -- the bf16 safetensors
+            # (~10-16GB) are never opened, so don't download them. If the
+            # non-quantized path already pulled a full copy of this repo (it will
+            # have config.json too), this check is already satisfied and we skip
+            # a redundant restricted download.
+            needs_download = not os.path.isdir(local_dir) or not os.path.isfile(
+                os.path.join(local_dir, "config.json")
+            )
+        else:
+            # Content-aware, not just "directory is non-empty": a prior quantized-path
+            # run may have already populated local_dir with only the restricted
+            # config/tokenizer files (no *.safetensors), which from_pretrained() below
+            # needs. Require at least one safetensors shard before treating this as
+            # already downloaded, otherwise we'd silently skip the download and hit a
+            # confusing bare FileNotFoundError deep inside from_pretrained().
+            needs_download = not os.path.isdir(local_dir) or not glob.glob(
+                os.path.join(local_dir, "*.safetensors")
+            )
+        if needs_download:
             logging.info("BooMossAudioLoader: downloading %s to %s", repo_id, local_dir)
-            snapshot_download(repo_id=repo_id, local_dir=local_dir)
+            if quantized:
+                snapshot_download(
+                    repo_id=repo_id,
+                    local_dir=local_dir,
+                    allow_patterns=["*.json", "*.jinja", "*.txt", "merges.txt", "vocab.json"],
+                )
+            else:
+                # snapshot_download is safe to call against a local_dir that already
+                # has some files (e.g. only the quantized path's config/tokenizer
+                # subset) -- it fills in whatever's missing rather than re-fetching
+                # or clobbering files that already match the remote.
+                snapshot_download(repo_id=repo_id, local_dir=local_dir)
 
-        load_device = model_management.get_torch_device()
         offload_device = model_management.unet_offload_device()
         dtype = model_management.text_encoder_dtype(load_device)
         if dtype not in (torch.float16, torch.bfloat16, torch.float32):
@@ -233,7 +326,43 @@ class BooMossAudioLoader(io.ComfyNode):
             # supports it.
             dtype = torch.bfloat16
 
-        hf_model = MossAudioModel.from_pretrained(local_dir, dtype=dtype)
+        if quantized:
+            # Unpublished-model/non-Blackwell validation already happened at the top
+            # of execute(), before any download.
+            quant_repo_id = MOSS_AUDIO_QUANTIZED_REPOS[model]
+            quant_local_dir = _local_model_dir(quant_repo_id)
+            if not os.path.isdir(quant_local_dir) or not os.listdir(quant_local_dir):
+                logging.info(
+                    "BooMossAudioLoader: downloading %s to %s", quant_repo_id, quant_local_dir
+                )
+                snapshot_download(repo_id=quant_repo_id, local_dir=quant_local_dir)
+
+            from safetensors.torch import load_file
+
+            try:
+                # See the top-of-file comment on MossAudioModel/MossAudioProcessor for why
+                # this needs both a relative and an absolute fallback import.
+                from .vendor.moss_audio.comfy_quant_patch import build_quantized_model
+                from .vendor.moss_audio.configuration_moss_audio import MossAudioConfig
+            except ImportError:
+                from vendor.moss_audio.comfy_quant_patch import build_quantized_model
+                from vendor.moss_audio.configuration_moss_audio import MossAudioConfig
+
+            config = MossAudioConfig.from_pretrained(local_dir)  # config still comes from the bf16 repo
+            weights_path = os.path.join(
+                quant_local_dir, "moss-audio-8b-thinking_nvfp4_convrot_int8.safetensors"
+            )
+            quantized_sd = load_file(weights_path)
+            hf_model, missing, unexpected = build_quantized_model(
+                config, quantized_sd, compute_dtype=dtype, device=load_device
+            )
+            if missing or unexpected:
+                raise RuntimeError(
+                    f"Quantized checkpoint load mismatch -- missing: {missing}, "
+                    f"unexpected: {unexpected}"
+                )
+        else:
+            hf_model = MossAudioModel.from_pretrained(local_dir, dtype=dtype)
         hf_model.eval()
         hf_model = _make_device_settable(hf_model)
         patcher = comfy.model_patcher.ModelPatcher(
